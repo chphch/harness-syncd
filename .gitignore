@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# Runtime state must never be committed to the public package repository.
+.harness-sync/.state.json
+.harness-sync/.managed.json
+.harness-sync/.lock
+.harness-sync/.local/
+.harness-sync/backups/
+.harness-sync/conflicts/
+
+# Local development configuration.
+harness-sync.local.yaml

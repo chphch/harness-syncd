@@ -1,0 +1,168 @@
+export const TARGET_NAMES = ["claude", "codex", "antigravity"] as const;
+
+export type TargetName = (typeof TARGET_NAMES)[number];
+export type Scope = "project" | "user";
+export type LinkMode = "symlink" | "copy";
+export type Fidelity = "exact" | "compatible" | "target-only" | "unsupported";
+
+export interface TargetConfig {
+  enabled: boolean;
+  root?: string;
+}
+
+export interface SyncPolicy {
+  debounceMs: number;
+  auditIntervalMs: number;
+  linkMode: LinkMode;
+  onConflict: "stop" | "prefer-canonical";
+}
+
+export interface GitPolicy {
+  enabled: boolean;
+  autoPush: boolean;
+  branch: string;
+  remote: string;
+}
+
+export interface ProjectConfig {
+  schemaVersion: 1;
+  scope: Scope;
+  store: string;
+  targets: Record<TargetName, TargetConfig>;
+  sync: SyncPolicy;
+  git: GitPolicy;
+}
+
+export interface McpServer {
+  transport: "stdio" | "http" | "sse" | "ws";
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  url?: string;
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+  /** Name of the environment variable containing a remote Bearer token. */
+  bearerTokenEnvVar?: string;
+  enabled?: boolean;
+  startupTimeoutMs?: number;
+  toolTimeoutMs?: number;
+  enabledTools?: string[];
+  disabledTools?: string[];
+  /** Native-only features that must be restored by a matching target adapter. */
+  requiredNativeFeatures?: Partial<Record<TargetName, string[]>>;
+}
+
+export interface PortablePermissions {
+  filesystem?: "read-only" | "workspace-write" | "full-access";
+  network?: "deny" | "prompt" | "allow";
+  approval?: "untrusted" | "on-request" | "never";
+  commandAllow?: string[];
+  commandDeny?: string[];
+  commandAsk?: string[];
+}
+
+export interface HookHandler {
+  type: "command" | "http" | "prompt" | "agent" | "mcp";
+  command?: string;
+  url?: string;
+  prompt?: string;
+  timeoutSeconds?: number;
+  async?: boolean;
+  extra?: Record<string, unknown>;
+}
+
+export interface HookGroup {
+  matcher?: string;
+  handlers: HookHandler[];
+}
+
+export interface AgentDefinition {
+  description: string;
+  instructionsFile: string;
+  model?: string;
+  reasoningEffort?: string;
+  filesystem?: PortablePermissions["filesystem"];
+  tools?: string[];
+  disallowedTools?: string[];
+  targets?: Partial<Record<TargetName, Record<string, unknown>>>;
+  /** Relative native agent file retained to avoid duplicate normalized layouts. */
+  nativePaths?: Partial<Record<TargetName, string>>;
+}
+
+export interface CommandDefinition {
+  description?: string;
+  promptFile: string;
+  argumentHint?: string;
+  targets?: Partial<Record<TargetName, Record<string, unknown>>>;
+}
+
+export interface TargetOverlay {
+  settings?: Record<string, unknown>;
+  mcp?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+export interface CanonicalHarness {
+  schemaVersion: 1;
+  metadata: {
+    name: string;
+    description?: string;
+  };
+  instructions: {
+    root: string;
+  };
+  rules: Array<{
+    path: string;
+    globs?: string[];
+    portable?: boolean;
+    targets?: Partial<Record<TargetName, Record<string, unknown>>>;
+  }>;
+  skills: Array<{
+    name: string;
+    path: string;
+  }>;
+  commands: Record<string, CommandDefinition>;
+  agents: Record<string, AgentDefinition>;
+  mcpServers: Record<string, McpServer>;
+  permissions: PortablePermissions;
+  hooks: Record<string, HookGroup[]>;
+  overlays: Record<TargetName, TargetOverlay>;
+}
+
+export interface AdapterWarning {
+  code: string;
+  message: string;
+  path?: string;
+  fidelity?: Fidelity;
+}
+
+export interface CaptureResult {
+  harness: CanonicalHarness;
+  warnings: AdapterWarning[];
+  imported: string[];
+}
+
+export interface ApplyResult {
+  target: TargetName;
+  written: string[];
+  linked: string[];
+  removed: string[];
+  skipped: string[];
+  warnings: AdapterWarning[];
+}
+
+export interface ProjectionState {
+  schemaVersion: 1;
+  revision: number;
+  canonicalHash: string;
+  targetHashes: Partial<Record<TargetName, string>>;
+  updatedAt: string;
+  lastWriter?: "canonical" | TargetName;
+}
+
+export interface SyncConflict {
+  detectedAt: string;
+  canonicalChanged: boolean;
+  changedTargets: TargetName[];
+  message: string;
+}

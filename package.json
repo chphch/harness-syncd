@@ -1,0 +1,57 @@
+{
+  "name": "harness-syncd",
+  "version": "0.1.0",
+  "description": "Local-first bidirectional configuration sync for Claude Code, Codex, and Antigravity",
+  "type": "module",
+  "bin": {
+    "harness-sync": "dist/cli.js",
+    "hsync": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm check && pnpm test && pnpm build"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "antigravity",
+    "agent-config",
+    "sync",
+    "daemon"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chphch/harness-syncd.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chphch/harness-syncd/issues"
+  },
+  "homepage": "https://github.com/chphch/harness-syncd#readme",
+  "dependencies": {
+    "chokidar": "^5.0.0",
+    "commander": "^15.0.0",
+    "jsonc-parser": "^3.3.1",
+    "smol-toml": "^1.8.0",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "tsx": "^4.20.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  },
+  "packageManager": "pnpm@12.3.4"
+}

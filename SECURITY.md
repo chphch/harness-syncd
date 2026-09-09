@@ -1,0 +1,40 @@
+# Security
+
+Harness configuration is executable configuration. Skills can instruct an agent to run commands, hooks execute commands directly, and MCP entries can launch local processes or send data to remote services.
+
+## Defaults
+
+- Migration is dry-run by default.
+- Unmanaged paths are never replaced without `--force`.
+- Forced paths are backed up before replacement.
+- Secret-like values are converted to environment references during import when a supported pattern is recognized.
+- Applied native capture is built and validated in a sibling stage; source/canonical hashes are rechecked, and an installed migration preflights every destination before canonical differences are committed.
+- Git sync runs a local secret scan, refuses tracked/staged runtime paths, and uses system Git without a shell. A local commit is created from the exact staged tree, validated in isolation, and activated only if the branch still has its expected parent.
+- Remote changes are fetch-only until `--accept-remote` is explicit, and the accepted candidate is validated in an isolated temporary worktree before the live store moves.
+- Git sync never force-pushes or hard-resets.
+- Simultaneous changes to distinct materialized target files stop with a conflict. Symlink aliases share one inode and therefore keep normal filesystem last-writer behavior.
+- Unsupported cross-target permission mappings are not synthesized as equivalents: they emit warnings, and existing target-local policies are retained through takeover.
+- Target-native MCP trust, approval, restrictive permission/hook, authentication, remote-environment, and required/eager-startup contracts are used only where a matching target-and-scope contract exists; projections without one disable the whole server where supported or omit it otherwise instead of silently widening or changing its runtime behavior.
+- Codex non-managed hook trust is machine-local and keyed to the exact hook definition. Syncing the hook file does not sync that review decision, so MCP servers that depend on such a hook remain disabled on Codex until the configuration is explicitly handled outside the portable contract.
+
+## Excluded sensitive state
+
+Never point a canonical store at a complete `~/.claude`, `~/.codex`, or `~/.gemini` tree. The adapters select authored subtrees only. Credentials, OAuth tokens, transcripts, trust decisions, caches, browser state, and conversations are outside the Git-synchronized authored boundary; ignored takeover bases and backups are the local exceptions described below.
+
+`~/.claude.json` is especially sensitive because it combines personal MCP data with authentication, trust, UI, and per-project state. The Claude adapter never rewrites it. During user-scope import, it inspects user MCP definitions and documented per-project `disabledMcpServers` membership only. That membership is not copied verbatim, but it can add a fail-closed source-native marker to a captured server so another target cannot silently activate it. Other interactive/UI/runtime MCP approval state remains machine-local; authored project approval settings such as `enableAllProjectMcpServers` and `enabledMcpjsonServers` in `.claude/settings.json` remain Claude-only but can be retained in the canonical overlay and Git-synced.
+
+## Private Git stores
+
+Use a private remote and protect it like source code with execution privileges. Review `HEAD...<reviewCommit>`, then pass that exact full ID to `--accept-remote <reviewCommit>`, especially for hooks, MCP commands, skills with scripts, and agents with broad permissions. A branch tip that moves afterward is not implicitly trusted. Accepted changes to symlinked instructions/skills are immediately visible; translated settings change only after a later apply/sync. Prefer SSH agents or an OS credential helper; credential-bearing remote URLs are rejected.
+
+The built-in scanner catches common patterns but cannot prove that a tree is secret-free. It scans every regular file up to 2 MiB regardless of extension; an oversized, unreadable, non-regular, or symlink entry is a blocking finding rather than silently skipped. It intentionally does not stage or scan the root `.local/`, `backups/`, `conflicts/`, `.state.json`, `.managed.json`, or `.lock` runtime paths, and it skips `.git` metadata directories. Git path checks separately refuse runtime/private paths even if ignore rules are wrong. Run an established secret scanner in the private repository's pre-commit/CI workflow as an additional layer.
+
+Migration redacts likely credentials from the canonical store. Installing a translated projection may therefore omit a secret-bearing native field until the documented environment variable or a machine-local native overlay is configured. Keep the forced-takeover backup until the migrated harness is verified.
+
+Forced takeover of an existing Claude settings file, Codex config, or Antigravity MCP config may retain its parsed target-local base under `.local/preserved/` so later whole-file rewrites do not discard unrelated restrictions or settings. These bases and forced-replacement backups can contain the original native values: both are machine-local, excluded from scanning and Git, and must be protected or removed like other credential-bearing local configuration.
+
+Imported and canonical bundles must contain regular files and directories. Nested symlinks, symlinked child directories, special files, embedded `.git` metadata, unmanaged directory symlinks at recursive import roots, and native import paths that resolve outside the selected harness root are rejected. Accepted regular-file source links are content-hashed only inside the selected boundary. Forced backups preserve the physical target of relative symlinks after relocation; recovery must recreate the link for its original location rather than move the rewritten link text back verbatim. Do not replace those checks with unrestricted symlink following when handling untrusted configuration.
+
+## Reporting a vulnerability
+
+Please use GitHub's private vulnerability reporting for the repository. Do not open a public issue containing credentials, private harness content, or an exploit that would put existing users at risk.
