@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes both the v0.1 implementation and the intended production design. Sections marked **v0.1** exist in the repository today; sections marked **next** describe the compatibility-preserving evolution path.
+This document describes both the v0.2 implementation and the intended production design. Sections marked **v0.2** exist in the repository today; sections marked **next** describe the compatibility-preserving evolution path.
 
 ## 1. Design constraints
 
@@ -53,6 +53,27 @@ The daemon keeps native files on disk. If it stops, Claude Code, Codex, and Anti
 ```
 
 The public application repository contains the daemon code. A user's optional private repository contains only the authored portion of the canonical store. Target-local takeover bases and original forced-replacement backups remain under ignored `.local/` and `backups/` runtime storage rather than the normal Git history. Credential redaction and scanning are defense in depth, not a guarantee—especially when the explicit `--allow-secrets` override is used—so even a private canonical repository must be treated as sensitive.
+
+### 3.1 Multi-controller supervisor
+
+Every project or user harness remains an independent controller with its own `harness-sync.yaml`, canonical store, state, and lock. A strict machine-local registry provides explicit enrollment and operational flags:
+
+```text
+machine registry
+  ├── user controller (at most one enabled)
+  ├── project controller A
+  └── project controller B
+          │
+          ▼
+stable config snapshots → topology validation → sorted all-lock barrier
+          │
+          ├── bounded parallel sync
+          └── coordinated foreground watch loops
+```
+
+The marker plus registry entry form a two-factor membership rule: filesystem discovery alone never enrolls a project. Stable controller IDs prevent a moved path or stale entry from silently taking another controller's place. Topology validation compares physical and lexical claims for controller files, canonical stores, current adapter watch paths, and stale paths retained in `.managed.json`; it also retains the future target of a dangling managed symlink. Overlap, duplicate identity, a registry inside a managed surface, or more than one enabled user controller fails before mutation.
+
+`sync --all` snapshots every enabled controller configuration, validates those exact loaded snapshots, acquires all selected store locks in sorted order, and verifies the snapshots again before any reconciliation. `watch --all` additionally establishes a watcher barrier on the registry and every enabled config before child loops start. A control-file change stops all children and releases all locks; an external service manager may then restart against a fresh plan. v0.2 deliberately uses fail-closed restart instead of live topology mutation.
 
 ## 4. Canonical model
 
@@ -140,11 +161,11 @@ interface HarnessAdapter {
 
 Migration snapshots the source target before capture and rechecks it before canonical commit and native installation. `migrate --apply --install` also dry-runs all target writers against the staged canonical tree before committing it. The real takeover then compares each covered native destination with its captured precondition before the first write to that path.
 
-The implementation uses custom adapters in v0.1 so every write and loss boundary is visible. Rulesync remains a useful future translation oracle: run a pinned version only in a scratch tree, compare its output with golden fixtures, and feed an approved `WritePlan` into this safety layer. It must not receive direct write access to a live project.
+The implementation uses custom adapters in v0.2 so every write and loss boundary is visible. Rulesync remains a useful future translation oracle: run a pinned version only in a scratch tree, compare its output with golden fixtures, and feed an approved `WritePlan` into this safety layer. It must not receive direct write access to a live project.
 
 ## 7. Reconciliation
 
-### v0.1 algorithm
+### v0.2 algorithm
 
 The state file records the last canonical hash and each target fingerprint. Target fingerprints contain only paths already owned by the synchronizer; watcher events for unmanaged/private siblings cause an audit but do not enroll them.
 
@@ -184,7 +205,7 @@ The transaction sequence is:
 7. Commit new semantic bases and output hashes.
 8. Ignore watcher events whose hashes match the committed projection.
 
-v0.1 implements locking, watcher debounce, atomic per-file writes, managed hashes, pre/post snapshot checks, startup/audit scans, conflict records, and a validated sibling stage for native capture/migration. The staged canonical commit and native projection still replace artifacts one at a time; a mid-commit I/O failure can leave some outputs updated while state remains at the prior revision. A write-ahead journal and operation-wide rollback are the next durability milestone.
+v0.2 implements locking, watcher debounce, atomic per-file writes, managed hashes, pre/post snapshot checks, startup/audit scans, conflict records, and a validated sibling stage for native capture/migration. The staged canonical commit and native projection still replace artifacts one at a time; a mid-commit I/O failure can leave some outputs updated while state remains at the prior revision. A write-ahead journal and operation-wide rollback are the next durability milestone.
 
 ## 8. Ownership and backups
 

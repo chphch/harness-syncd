@@ -26,6 +26,8 @@ export interface GitPolicy {
 
 export interface ProjectConfig {
   schemaVersion: 1;
+  /** Stable logical identity used by the machine-local controller registry. */
+  controllerId?: string;
   scope: Scope;
   store: string;
   targets: Record<TargetName, TargetConfig>;

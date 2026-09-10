@@ -694,6 +694,52 @@ describe("projection safety", () => {
     await expect(loadProjectConfig(controller)).rejects.toThrow(/sync\.linkMode/u);
   });
 
+  it("assigns a stable controller identity while keeping legacy configs readable", async () => {
+    const root = await tempRoot();
+    const project = await initializeProject(root);
+    const firstId = project.config.controllerId;
+
+    expect(firstId).toMatch(/^[a-z0-9][a-z0-9._-]*-[0-9a-f]{8}$/u);
+    await expect(initializeProject(root)).resolves.toMatchObject({
+      config: { controllerId: firstId },
+    });
+
+    const legacyRoot = await tempRoot();
+    const legacyController = join(legacyRoot, "harness-sync.yaml");
+    await writeFile(
+      legacyController,
+      "schemaVersion: 1\nscope: project\nstore: .harness-sync\n",
+      "utf8",
+    );
+    await expect(loadProjectConfig(legacyController)).resolves.toMatchObject({
+      scope: "project",
+    });
+    expect((await loadProjectConfig(legacyController)).controllerId).toBeUndefined();
+  });
+
+  it("rejects an invalid controller identity before writing controller state", async () => {
+    const root = await tempRoot();
+
+    await expect(
+      initializeProject(root, { controllerId: "../../outside" }),
+    ).rejects.toThrow(/controllerId/u);
+    expect(await pathExists(join(root, "harness-sync.yaml"))).toBe(false);
+  });
+
+  it("rejects an empty identity and a store containing its own controller", async () => {
+    const emptyIdRoot = await tempRoot();
+    await expect(
+      initializeProject(emptyIdRoot, { controllerId: "" }),
+    ).rejects.toThrow(/controllerId/u);
+    expect(await pathExists(join(emptyIdRoot, "harness-sync.yaml"))).toBe(false);
+
+    const overlappingRoot = await tempRoot();
+    await expect(
+      initializeProject(overlappingRoot, { store: "." }),
+    ).rejects.toThrow(/canonical store overlaps project controller/u);
+    expect(await pathExists(join(overlappingRoot, "harness-sync.yaml"))).toBe(false);
+  });
+
   it.skipIf(process.platform === "win32")("includes executable bits in artifact hashes", async () => {
     const root = await tempRoot();
     const script = join(root, "run.sh");

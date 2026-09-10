@@ -15,6 +15,10 @@ import { pathExists, writeTextAtomic, writeTextAtomicInside } from "./fs.js";
 export const PROJECT_CONFIG_NAME = "harness-sync.yaml";
 export const HARNESS_FILE_NAME = "harness.yaml";
 
+export function isControllerId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
+}
+
 export function defaultProjectConfig(scope: Scope = "project"): ProjectConfig {
   return {
     schemaVersion: 1,
@@ -87,6 +91,15 @@ export async function loadProjectConfig(path: string): Promise<ProjectConfig> {
   ) {
     throw new Error(`${path}: scope must be project or user`);
   }
+  if (
+    parsed.controllerId !== undefined &&
+    (typeof parsed.controllerId !== "string" ||
+      !isControllerId(parsed.controllerId))
+  ) {
+    throw new Error(
+      `${path}: controllerId must be 1-128 characters using letters, numbers, dot, underscore, or hyphen`,
+    );
+  }
   assertOptionalConfigType(parsed, "store", (value) => typeof value === "string", path);
   assertOptionalConfigType(parsed, "targets", isRecord, path);
   assertOptionalConfigType(parsed, "sync", isRecord, path);
@@ -146,6 +159,9 @@ export async function loadProjectConfig(path: string): Promise<ProjectConfig> {
   }
   return {
     ...defaults,
+    ...(typeof parsed.controllerId === "string"
+      ? { controllerId: parsed.controllerId }
+      : {}),
     store: typeof parsed.store === "string" ? parsed.store : defaults.store,
     targets,
     sync: {

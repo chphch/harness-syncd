@@ -16,6 +16,18 @@ Harness configuration is executable configuration. Skills can instruct an agent 
 - Unsupported cross-target permission mappings are not synthesized as equivalents: they emit warnings, and existing target-local policies are retained through takeover.
 - Target-native MCP trust, approval, restrictive permission/hook, authentication, remote-environment, and required/eager-startup contracts are used only where a matching target-and-scope contract exists; projections without one disable the whole server where supported or omit it otherwise instead of silently widening or changing its runtime behavior.
 - Codex non-managed hook trust is machine-local and keyed to the exact hook definition. Syncing the hook file does not sync that review decision, so MCP servers that depend on such a hook remain disabled on Codex until the configuration is explicitly handled outside the portable contract.
+- Fleet membership is explicit. Discovery never enrolls a controller, the registry is machine-local, and a registry identity must match the stable `controllerId` in the controller file.
+- Fleet writes validate controller/store/native/managed-path separation, capture stable config bytes, acquire every selected store lock before the first mutation, and fail closed if control files change.
+
+## Multi-controller boundary
+
+Treat `~/.config/harness-sync/registry.yaml` as trusted machine policy. It selects which controller files and native surfaces a single supervisor may write. The loader rejects symlinked registry files, relative controller paths, duplicate physical controller files, unknown fields, and automatic-enrollment settings. Registry mutations use their own lock and atomic replacement.
+
+Only one user-scope controller can be enabled. Project controllers may be added only when their controller files, stores, adapter watch paths, and retained `.managed.json` claims do not overlap another enabled controller. Both a symlink's native directory entry and its live or future target are claims; a dangling link cannot reserve an invisible path that later becomes another store.
+
+Run a single `watch --all` process for each registry. It holds all selected store locks and stops the fleet when the registry or an enabled controller config changes. Standalone processes using different, unregistered stores cannot coordinate registry-wide claims, so do not run them concurrently against native surfaces supervised by the fleet.
+
+The registry is not part of private Git synchronization. This prevents one machine's paths and enrollment choices from silently authorizing writes on another machine. Enroll controllers separately after cloning and reviewing their private canonical stores.
 
 ## Excluded sensitive state
 

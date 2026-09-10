@@ -1,6 +1,6 @@
 {
   "name": "harness-syncd",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-first bidirectional configuration sync for Claude Code, Codex, and Antigravity",
   "type": "module",
   "bin": {
@@ -9,7 +9,9 @@
   },
   "files": [
     "dist",
+    "docs",
     "README.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {

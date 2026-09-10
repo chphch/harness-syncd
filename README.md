@@ -4,7 +4,7 @@ Local-first, bidirectional harness synchronization for **Claude Code**, **Codex*
 
 `harness-syncd` keeps one Git-friendly canonical store, exposes byte-identical artifacts such as skills through per-skill symlinks, and materializes settings that require schema translation. Edits to already-managed native outputs are detected by a file watcher plus periodic hash audit and can flow back into the canonical store; unmanaged local additions are never silently enrolled.
 
-> **Status: v0.1 alpha.** Instructions, skills, rules, subagents, commands-as-skills, common MCP fields, target-native hook overlays, Claude migration, foreground watching, and personal Git sync work. Models, tool IDs, hooks, permissions, and undocumented settings stay target-specific unless a mapping is demonstrably safe.
+> **Status: v0.2 alpha.** Instructions, skills, rules, subagents, commands-as-skills, common MCP fields, target-native hook overlays, Claude migration, foreground watching, personal Git sync, and one machine-local supervisor for user plus project controllers work. Models, tool IDs, hooks, permissions, and undocumented settings stay target-specific unless a mapping is demonstrably safe.
 
 ## Why this exists
 
@@ -66,6 +66,34 @@ harness-sync migrate claude --apply --install --force
 
 When a forced takeover must rewrite an existing Claude settings file, Codex config, or Antigravity MCP config, its target-local base is also retained under `.harness-sync/.local/preserved/`. Later projections merge that machine-local base underneath canonical values, so unrelated native restrictions and settings survive repeated applies without entering Git.
 
+## User + project fleet
+
+Each `harness-sync.yaml` is an independent controller. Explicitly enroll the controllers this machine should manage in `~/.config/harness-sync/registry.yaml`:
+
+```bash
+# New project controller: initialize and enroll in one step.
+harness-sync -C /path/to/project init --register
+
+# Existing or legacy controller: assigns controllerId when needed, then enrolls.
+harness-sync manage add /path/to/project
+
+# One user-scope controller for ~/.claude, ~/.codex, and ~/.gemini.
+harness-sync -C ~/.config/harness-sync/user init \
+  --scope user \
+  --store ~/.local/share/harness-sync/user \
+  --register
+
+# Inspect and operate the enrolled fleet.
+harness-sync manage list
+harness-sync status --all
+harness-sync sync --all
+harness-sync watch --all
+```
+
+Enrollment is deliberately two-factor: a valid controller file must exist and the machine-local registry must name it. `manage discover /bounded/root` only reports valid markers; it never enrolls them. The supervisor accepts one enabled user-scope controller and any number of non-overlapping project controllers. Before a fleet write it validates stable controller identities and path ownership, acquires every selected store lock in deterministic order, then reconciles with bounded concurrency. `watch --all` stops and asks for a restart if the registry or any enabled controller config changes, so it never continues under a stale topology.
+
+Use `manage set <id> --watch false`, `manage set <id> --enabled false`, or `manage remove <id>` to change local enrollment without deleting project files or canonical stores. A missing/offline entry remains visible and removable. See [fleet management](docs/fleet.md) for the registry schema, recovery behavior, and service setup guidance.
+
 ## Personal/private Git sync
 
 The source-code repository and your configuration repository are intentionally separate. For a private store, choose an external store when initializing the project:
@@ -113,6 +141,7 @@ The project controller is `harness-sync.yaml`:
 
 ```yaml
 schemaVersion: 1
+controllerId: example-a1b2c3d4
 scope: project
 store: .harness-sync
 targets:
@@ -137,12 +166,12 @@ git:
 |---|---|---|---|---|
 | Root instructions | `CLAUDE.md` | `AGENTS.md` | one of `AGENTS.md` / `GEMINI.md` | Exact body after safe wrapper expansion |
 | Skills | `.claude/skills/*` | `.agents/skills/*` | `.agents/skills/*` | Shared bundle/symlink |
-| Scoped rules | `.claude/rules/**/*.md` | Root instructions only in v0.1 | `.agents/rules/*.md` | Adapted |
+| Scoped rules | `.claude/rules/**/*.md` | Root instructions only in v0.2 | `.agents/rules/*.md` | Adapted |
 | Subagents | Markdown/frontmatter | `.codex/agents/*.toml` | `.agents/agents/*.md` | Prompt/description + conservative target fallback; native capabilities stay in their source overlay |
 | Legacy commands | `.claude/commands/*.md` | Skill projection | Skill projection | Adapted |
 | MCP | `.mcp.json` + disable setting | `.codex/config.toml` | `.agents/mcp_config.json` | Common fields + fail-closed controls + raw overlay |
-| Hooks | Claude settings | Codex `config.toml` / `hooks.json` | `.agents/hooks.json` | Target-only in v0.1 |
-| Permissions | allow/ask/deny | sandbox + approval | Not projected in v0.1 | Same-target mapping; unsupported cross-target policy is warned and left target-local |
+| Hooks | Claude settings | Codex `config.toml` / `hooks.json` | `.agents/hooks.json` | Target-only in v0.2 |
+| Permissions | allow/ask/deny | sandbox + approval | Not projected in v0.2 | Same-target mapping; unsupported cross-target policy is warned and left target-local |
 | General settings | JSON overlay | TOML overlay | Opaque overlay | Target-only |
 
 For exact paths, scope rules, reload behavior, and documentation discrepancies, see [compatibility.md](docs/compatibility.md).
@@ -175,6 +204,7 @@ Read [SECURITY.md](SECURITY.md) before enabling hooks or syncing a store between
 - [Detailed architecture](docs/architecture.md)
 - [Official structure and compatibility matrix](docs/compatibility.md)
 - [Claude migration behavior](docs/migration.md)
+- [User and project fleet management](docs/fleet.md)
 - [Security policy](SECURITY.md)
 
 ## Development

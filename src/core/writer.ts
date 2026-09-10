@@ -583,6 +583,46 @@ export async function managedPathsForTarget(
   return registry ? ownedPaths(registry, target) : [];
 }
 
+/**
+ * Return every native path ever recorded by this store, including paths whose
+ * target is currently disabled. Fleet registration uses this stricter view so
+ * a second controller cannot claim a stale managed destination.
+ */
+export async function managedPathsForStore(storeDir: string): Promise<string[]> {
+  const path = join(storeDir, ".managed.json");
+  await assertSafeStorePath(storeDir, path);
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return [];
+    throw error;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`invalid managed path registry at ${path}`, { cause: error });
+  }
+  if (!isManagedRegistryShape(parsed)) {
+    throw new Error(`invalid managed path registry at ${path}`);
+  }
+  const paths = new Set([
+    ...Object.keys(parsed.files),
+    ...Object.keys(parsed.links),
+    ...Object.keys(parsed.owners ?? {}),
+  ]);
+  for (const nativePath of paths) {
+    if (!isAbsolute(nativePath)) {
+      throw new Error(
+        `invalid non-absolute managed path in ${path}: ${nativePath}`,
+      );
+    }
+  }
+  return [...paths].sort();
+}
+
 export async function changedManagedPathsForTarget(
   storeDir: string,
   target: TargetName,
@@ -688,6 +728,19 @@ async function readManagedRegistry(storeDir: string): Promise<ManagedRegistry | 
   } catch {
     return null;
   }
+}
+
+function isManagedRegistryShape(value: unknown): value is ManagedRegistry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return candidate.schemaVersion === 1 &&
+    isRecordValue(candidate.files) &&
+    isRecordValue(candidate.links) &&
+    (candidate.owners === undefined || isRecordValue(candidate.owners));
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function ownedPaths(registry: ManagedRegistry, target: TargetName): string[] {

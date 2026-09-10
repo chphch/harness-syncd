@@ -9,7 +9,11 @@ import {
   type TargetName,
 } from "./types.js";
 import { getAdapter } from "./adapters/index.js";
-import { loadHarness, writeProjectConfig } from "./core/config.js";
+import {
+  isControllerId,
+  loadHarness,
+  writeProjectConfig,
+} from "./core/config.js";
 import { watchProject } from "./core/daemon.js";
 import {
   connectRemote,
@@ -21,15 +25,31 @@ import { migrateFrom } from "./core/migrate.js";
 import {
   adapterContext,
   applyHarness,
+  createControllerId,
   enabledTargets,
   initializeProject,
   loadProject,
+  type LoadedProject,
 } from "./core/project.js";
+import {
+  addController,
+  DEFAULT_REGISTRY_PATH,
+  discoverControllers,
+  listControllers,
+  removeController,
+  updateController,
+} from "./core/registry.js";
 import { establishBaseline, reconcileOnce } from "./core/reconcile.js";
 import { scanStoreForSecrets } from "./core/secret-scan.js";
 import { hashCanonical, readState } from "./core/state.js";
 import { acquireLock } from "./core/fs.js";
 import { validateHarness } from "./core/validate.js";
+import {
+  statusAllControllers,
+  syncAllControllers,
+  watchAllControllers,
+  type FleetWatchEvent,
+} from "./core/supervisor.js";
 
 const program = new Command();
 
@@ -38,8 +58,13 @@ program
   .description(
     "Local-first harness sync for Claude Code, Codex, and Antigravity",
   )
-  .version("0.1.0")
+  .version("0.2.0")
   .option("-C, --cwd <path>", "project directory", process.cwd())
+  .option(
+    "--registry <path>",
+    "machine-local multi-controller registry",
+    DEFAULT_REGISTRY_PATH,
+  )
   .option("--json", "print machine-readable JSON");
 
 program
@@ -51,17 +76,144 @@ program
       .default("project"),
   )
   .option("--store <path>", "canonical store path")
-  .action(async (options: { scope: Scope; store?: string }) => {
+  .option("--id <id>", "stable controller identity")
+  .option("--register", "enroll this controller in the machine registry")
+  .action(async (options: {
+    scope: Scope;
+    store?: string;
+    id?: string;
+    register?: boolean;
+  }) => {
     const project = await initializeProject(cwd(), {
       scope: options.scope,
       ...(options.store ? { store: options.store } : {}),
+      ...(options.id !== undefined ? { controllerId: options.id } : {}),
     });
+    const controllerId = await ensureControllerIdentity(project, options.id);
+    const registered = options.register
+      ? await addController(project.configPath, {
+          registryPath: registryPath(),
+        })
+      : undefined;
     print({
       initialized: true,
       config: project.configPath,
       store: project.storeDir,
       scope: project.config.scope,
+      controllerId,
+      ...(registered ? { registered } : {}),
     });
+  });
+
+const manage = program
+  .command("manage")
+  .description("manage the machine-local controller registry");
+
+manage
+  .command("add")
+  .description("explicitly enroll an existing controller")
+  .argument("[path]", "controller file or a directory below it")
+  .option("--id <id>", "set an identity on a legacy controller before enrolling")
+  .option("--disabled", "enroll without enabling fleet operations")
+  .option("--no-watch", "exclude this controller from watch --all")
+  .action(async (
+    path: string | undefined,
+    options: { id?: string; disabled?: boolean; watch: boolean },
+  ) => {
+    const project = await loadProject(path ? resolve(path) : cwd());
+    await ensureControllerIdentity(project, options.id);
+    const controller = await addController(project.configPath, {
+      registryPath: registryPath(),
+      enabled: options.disabled !== true,
+      watch: options.watch,
+    });
+    print({ registered: true, controller, registry: registryPath() });
+  });
+
+manage
+  .command("list")
+  .description("list enrolled controllers, including offline entries")
+  .action(async () => {
+    const controllers = (await listControllers(registryPath())).map(
+      serializeListedController,
+    );
+    print({ registry: registryPath(), controllers });
+    if (
+      controllers.some(
+        (entry) =>
+          entry.enabled && (entry.status === "missing" || entry.status === "invalid"),
+      )
+    ) {
+      process.exitCode = 2;
+    }
+  });
+
+manage
+  .command("remove")
+  .description("unenroll a controller without deleting its files or store")
+  .argument("<id>", "controller identity")
+  .action(async (id: string) => {
+    const controller = await removeController(id, registryPath());
+    print({ registered: false, controller, registry: registryPath() });
+  });
+
+manage
+  .command("set")
+  .description("change enabled/watch flags for an enrolled controller")
+  .argument("<id>", "controller identity")
+  .addOption(
+    new Option("--enabled <value>", "participate in fleet operations")
+      .choices(["true", "false"]),
+  )
+  .addOption(
+    new Option("--watch <value>", "participate in watch --all")
+      .choices(["true", "false"]),
+  )
+  .action(async (
+    id: string,
+    options: { enabled?: "true" | "false"; watch?: "true" | "false" },
+  ) => {
+    if (options.enabled === undefined && options.watch === undefined) {
+      throw new Error("manage set requires --enabled and/or --watch");
+    }
+    const controller = await updateController(
+      id,
+      {
+        ...(options.enabled !== undefined
+          ? { enabled: options.enabled === "true" }
+          : {}),
+        ...(options.watch !== undefined
+          ? { watch: options.watch === "true" }
+          : {}),
+      },
+      registryPath(),
+    );
+    print({ updated: true, controller, registry: registryPath() });
+  });
+
+manage
+  .command("discover")
+  .description("find valid controller markers without enrolling them")
+  .argument("[roots...]", "bounded roots to scan")
+  .option("--max-depth <count>", "maximum directory depth", parseNonNegativeInteger)
+  .option("--max-entries <count>", "maximum entries to inspect", parsePositiveInteger)
+  .option("--max-results <count>", "maximum controllers to return", parsePositiveInteger)
+  .action(async (
+    roots: string[],
+    options: { maxDepth?: number; maxEntries?: number; maxResults?: number },
+  ) => {
+    const controllers = await discoverControllers({
+      registryPath: registryPath(),
+      ...(roots.length > 0 ? { roots: roots.map((root) => resolve(root)) } : {}),
+      ...(options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {}),
+      ...(options.maxEntries !== undefined
+        ? { maxEntries: options.maxEntries }
+        : {}),
+      ...(options.maxResults !== undefined
+        ? { maxResults: options.maxResults }
+        : {}),
+    });
+    print({ registry: registryPath(), mutated: false, controllers });
   });
 
 program
@@ -143,7 +295,24 @@ program
 program
   .command("sync")
   .description("perform one hash-based bidirectional reconciliation")
-  .action(async () => {
+  .option("--all", "reconcile every enabled registered controller")
+  .option("--concurrency <count>", "maximum parallel controllers", parsePositiveInteger)
+  .action(async (options: { all?: boolean; concurrency?: number }) => {
+    if (options.all) {
+      assertNoCwdWithAll();
+      const result = await syncAllControllers(registryPath(), {
+        ...(options.concurrency !== undefined
+          ? { concurrency: options.concurrency }
+          : {}),
+      });
+      print(result);
+      if (result.summary.errors > 0) process.exitCode = 1;
+      else if (result.summary.conflicts > 0) process.exitCode = 2;
+      return;
+    }
+    if (options.concurrency !== undefined) {
+      throw new Error("--concurrency requires --all");
+    }
     const result = await reconcileOnce(await loadProject(cwd()));
     print(result);
     if (result.action === "conflict") process.exitCode = 2;
@@ -152,26 +321,53 @@ program
 program
   .command("watch")
   .description("run the foreground reconciliation daemon")
-  .action(async () => {
-    const project = await loadProject(cwd());
-    const controller = new AbortController();
-    const stop = () => controller.abort();
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-    print({ watching: project.projectRoot, auditIntervalMs: project.config.sync.auditIntervalMs });
-    await watchProject(project, {
-      signal: controller.signal,
-      onResult: (result) => {
-        if (result.action !== "noop") print(result);
-      },
-      onError: (error) => process.stderr.write(`${error.message}\n`),
-    });
+  .option("--all", "watch every enabled registered controller with watch enabled")
+  .action(async (options: { all?: boolean }) => {
+    if (options.all) assertNoCwdWithAll();
+    const signals = processAbortController();
+    try {
+      if (options.all) {
+        printEvent({ watching: "all", registry: registryPath() });
+        await watchAllControllers({
+          registryPath: registryPath(),
+          signal: signals.controller.signal,
+          onEvent: (event) => {
+            if (event.type !== "result" || event.result.action !== "noop") {
+              printFleetWatchEvent(event);
+            }
+          },
+        });
+        return;
+      }
+      const project = await loadProject(cwd());
+      print({
+        watching: project.projectRoot,
+        auditIntervalMs: project.config.sync.auditIntervalMs,
+      });
+      await watchProject(project, {
+        signal: signals.controller.signal,
+        onResult: (result) => {
+          if (result.action !== "noop") print(result);
+        },
+        onError: (error) => process.stderr.write(`${error.message}\n`),
+      });
+    } finally {
+      signals.dispose();
+    }
   });
 
 program
   .command("status")
   .description("show configured targets and the latest reconciliation state")
-  .action(async () => {
+  .option("--all", "show every registered controller, including offline entries")
+  .action(async (options: { all?: boolean }) => {
+    if (options.all) {
+      assertNoCwdWithAll();
+      const result = await statusAllControllers(registryPath());
+      print(result);
+      if (result.summary.degraded > 0) process.exitCode = 2;
+      return;
+    }
     const project = await loadProject(cwd());
     const targets = await Promise.all(
       enabledTargets(project).map(async (target) => ({
@@ -366,6 +562,122 @@ program.parseAsync().catch((error: unknown) => {
 
 function cwd(): string {
   return resolve(program.opts<{ cwd: string }>().cwd);
+}
+
+function registryPath(): string {
+  return resolve(program.opts<{ registry: string }>().registry);
+}
+
+function assertNoCwdWithAll(): void {
+  if (program.getOptionValueSource("cwd") === "cli") {
+    throw new Error("-C/--cwd cannot be combined with --all; registry enrollment selects controllers");
+  }
+}
+
+async function ensureControllerIdentity(
+  project: LoadedProject,
+  requestedId?: string,
+): Promise<string> {
+  if (requestedId !== undefined && !isControllerId(requestedId)) {
+    throw new Error(
+      "controller id must be 1-128 characters using letters, numbers, dot, underscore, or hyphen",
+    );
+  }
+  const proposedId =
+    requestedId ??
+    project.config.controllerId ??
+    createControllerId(project.projectRoot);
+  const release = await acquireLock(`${project.configPath}.init.lock`);
+  try {
+    const latest = await loadProject(project.configPath);
+    if (latest.config.controllerId) {
+      if (
+        requestedId !== undefined &&
+        latest.config.controllerId !== requestedId
+      ) {
+        throw new Error(
+          `controller identity changed concurrently to ${latest.config.controllerId}`,
+        );
+      }
+      project.config.controllerId = latest.config.controllerId;
+      return latest.config.controllerId;
+    }
+    latest.config.controllerId = proposedId;
+    await writeProjectConfig(latest.configPath, latest.config);
+    project.config.controllerId = proposedId;
+    return proposedId;
+  } finally {
+    await release();
+  }
+}
+
+function serializeListedController(
+  entry: Awaited<ReturnType<typeof listControllers>>[number],
+) {
+  if (entry.status !== "online") {
+    return {
+      id: entry.id,
+      config: entry.config,
+      enabled: entry.enabled,
+      watch: entry.watch,
+      status: entry.status,
+      error: entry.error,
+    };
+  }
+  return {
+    id: entry.id,
+    config: entry.config,
+    enabled: entry.enabled,
+    watch: entry.watch,
+    status: entry.status,
+    scope: entry.project.config.scope,
+    store: entry.project.storeDir,
+  };
+}
+
+function parsePositiveInteger(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error("expected a positive integer");
+  }
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error("expected a non-negative integer");
+  }
+  return parsed;
+}
+
+function processAbortController(): {
+  controller: AbortController;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  return {
+    controller,
+    dispose: () => {
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+    },
+  };
+}
+
+function printFleetWatchEvent(event: FleetWatchEvent): void {
+  printEvent({ controller: event.id, config: event.configPath, ...event });
+}
+
+function printEvent(value: unknown): void {
+  if (program.opts<{ json?: boolean }>().json === true) {
+    process.stdout.write(`${JSON.stringify(value)}\n`);
+  } else {
+    print(value);
+  }
 }
 
 function shellArgument(value: string): string {

@@ -63,6 +63,40 @@ export async function resolvePhysicalPath(path: string): Promise<string> {
   }
 }
 
+/** Resolve a native claim both as its directory entry and, when it is a
+ * symlink, as its target. Keeping the leaf identity prevents a managed link
+ * from hiding a collision at the native location. */
+export async function resolvePathClaims(path: string): Promise<string[]> {
+  const absolute = resolve(path);
+  const lexical = join(
+    await resolvePhysicalPath(dirname(absolute)),
+    basename(absolute),
+  );
+  let target = lexical;
+  try {
+    target = await resolvePhysicalPath(absolute);
+  } catch (error) {
+    if (!(error instanceof Error && error.message.includes("broken symlink"))) {
+      throw error;
+    }
+    // realpath cannot resolve a dangling leaf, but the link still claims its
+    // future target. Preserve that target so another controller cannot create
+    // a store there and silently bring this managed link to life inside it.
+    try {
+      const rawTarget = await readlink(lexical);
+      const linkTarget = isAbsolute(rawTarget)
+        ? rawTarget
+        : resolve(dirname(lexical), rawTarget);
+      target = await resolvePhysicalPath(linkTarget);
+    } catch (linkError) {
+      if (!(isNodeError(linkError) && linkError.code === "EINVAL")) {
+        throw linkError;
+      }
+    }
+  }
+  return [...new Set([absolute, lexical, target])];
+}
+
 /** Refuse a native import that resolves outside the harness boundary. A
  * managed projection may resolve directly to its exact canonical destination,
  * including when that store is intentionally on another filesystem path. */
