@@ -655,6 +655,21 @@ describe("projection safety", () => {
     ]);
   });
 
+  it("skips __pycache__ at any depth without reporting its compiled files", async () => {
+    const root = await tempRoot();
+    await mkdir(join(root, "skills", "demo", "__pycache__"), { recursive: true });
+    await writeFile(
+      join(root, "skills", "demo", "__pycache__", "demo.cpython-314.pyc"),
+      Buffer.concat([
+        Buffer.from([0x42, 0x0d, 0x0a, 0x00]),
+        Buffer.from("password=binary-private-value-1234567890\n"),
+      ]),
+    );
+    await writeFile(join(root, "skills", "demo", "demo.py"), "value = 1\n");
+
+    expect(await scanStoreForSecrets(root)).toEqual([]);
+  });
+
   it("does not let a NUL byte hide a private key from the scan", async () => {
     const root = await tempRoot();
     await writeFile(
@@ -686,6 +701,19 @@ describe("projection safety", () => {
       { path: "compound.yaml", line: 2, rule: "literal-secret-field" },
       { path: "compound.yaml", line: 3, rule: "literal-secret-field" },
     ]);
+  });
+
+  it("treats an interpolation cut off by a nested quote as a dynamic reference", async () => {
+    const root = await tempRoot();
+    await writeFile(
+      join(root, "share.sh"),
+      [
+        'TOKEN="$(curl -s -X POST "$HOST/api/login" --data @-)"',
+        'SESSION_KEY="${LONG_PRIVATE_SESSION_NAME}"',
+      ].join("\n"),
+    );
+
+    expect(await scanStoreForSecrets(root)).toEqual([]);
   });
 
   it("detects unquoted credential values that interleave letters and digits", async () => {

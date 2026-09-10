@@ -13,6 +13,12 @@ const EXCLUDED_DIRECTORIES = new Set([
   "backups",
   "conflicts",
 ]);
+// Machine-generated at any depth, and derived from sources that are scanned
+// anyway. Unlike a NUL-byte heuristic this cannot hide an authored file.
+const EXCLUDED_DIRECTORIES_AT_ANY_DEPTH = new Set([
+  ".git",
+  "__pycache__",
+]);
 const EXCLUDED_FILES = new Set([
   ".lock",
   ".managed.json",
@@ -164,7 +170,11 @@ function readQuotedValue(input: string, quote: '"' | "'"): string | null {
 }
 
 function containsDynamicReference(value: string): boolean {
-  return /\$\{[^}]+\}|\$\([^)]+\)|\$env:[A-Za-z_][A-Za-z\d_]*|\$[A-Za-z_][A-Za-z\d_]*|%[A-Za-z_][A-Za-z\d_]*%|\{\{[^}]+\}\}|<%[^%]+%>/iu
+  // `${` and `$(` match unterminated too: a quoted value is cut at the next
+  // quote, so an interpolation or command substitution that spans quotes
+  // (TOKEN="$(curl -X POST "$HOST/login") reaches this function without its
+  // closing bracket and would otherwise read as a literal.
+  return /\$\{|\$\(|\$env:[A-Za-z_][A-Za-z\d_]*|\$[A-Za-z_][A-Za-z\d_]*|%[A-Za-z_][A-Za-z\d_]*%|\{\{[^}]+\}\}|<%[^%]+%>/iu
     .test(value);
 }
 
@@ -178,7 +188,7 @@ async function listScannableEntries(
   for (const entry of entries) {
     const relativePath = join(current, entry.name);
     if (entry.isDirectory()) {
-      const excluded = entry.name.toLowerCase() === ".git" ||
+      const excluded = EXCLUDED_DIRECTORIES_AT_ANY_DEPTH.has(entry.name.toLowerCase()) ||
         (current === "" && EXCLUDED_DIRECTORIES.has(entry.name.toLowerCase()));
       if (!excluded) {
         output.push(
