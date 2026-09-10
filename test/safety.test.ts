@@ -640,6 +640,123 @@ describe("projection safety", () => {
     );
   });
 
+  it("reports NUL-containing regular files instead of silently skipping them", async () => {
+    const root = await tempRoot();
+    await writeFile(
+      join(root, "compiled.pyc"),
+      Buffer.concat([
+        Buffer.from([0x42, 0x0d, 0x0a, 0x00]),
+        Buffer.from("password=binary-private-value-1234567890\n"),
+      ]),
+    );
+
+    expect(await scanStoreForSecrets(root)).toEqual([
+      { path: "compiled.pyc", line: 0, rule: "binary-file-not-scanned" },
+    ]);
+  });
+
+  it("does not let a NUL byte hide a private key from the scan", async () => {
+    const root = await tempRoot();
+    await writeFile(
+      join(root, "sneaky.md"),
+      Buffer.concat([
+        Buffer.from("-----BEGIN RSA PRIVATE KEY-----\n"),
+        Buffer.from([0x00]),
+      ]),
+    );
+
+    expect(await scanStoreForSecrets(root)).toEqual([
+      { path: "sneaky.md", line: 0, rule: "binary-file-not-scanned" },
+    ]);
+  });
+
+  it("detects credential fields whose name is embedded in a compound key", async () => {
+    const root = await tempRoot();
+    await writeFile(
+      join(root, "compound.yaml"),
+      [
+        'db_password = "very-private-literal-value"',
+        'openai_api_key: "abcdefghijklmnopq"',
+        'config.password = "actual-private-literal-value"',
+      ].join("\n"),
+    );
+
+    expect(await scanStoreForSecrets(root)).toEqual([
+      { path: "compound.yaml", line: 1, rule: "literal-secret-field" },
+      { path: "compound.yaml", line: 2, rule: "literal-secret-field" },
+      { path: "compound.yaml", line: 3, rule: "literal-secret-field" },
+    ]);
+  });
+
+  it("detects unquoted credential values that interleave letters and digits", async () => {
+    const root = await tempRoot();
+    await writeFile(join(root, "alnum.env"), "api_key=abc123def456ghi789\n");
+
+    expect(await scanStoreForSecrets(root)).toEqual([
+      { path: "alnum.env", line: 1, rule: "literal-secret-field" },
+    ]);
+  });
+
+  it("does not mistake JavaScript and Python expressions for literal credentials", async () => {
+    const root = await tempRoot();
+    await writeFile(
+      join(root, "references.ts"),
+      [
+        "const password = process.env.DATABASE_PASSWORD;",
+        "const token = credentials.accessToken;",
+        "const authorization = createAuthorization(request);",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(root, "references.py"),
+      [
+        "api_key = load_api_key()",
+        'client_secret = settings["client_secret"]',
+        "credential = configured_credential_value",
+      ].join("\n"),
+    );
+
+    expect(await scanStoreForSecrets(root)).toEqual([]);
+  });
+
+  it("does not mistake templates or environment references for literal credentials", async () => {
+    const root = await tempRoot();
+    await writeFile(
+      join(root, "references.env"),
+      [
+        "password=$LONG_PRIVATE_PASSWORD_NAME",
+        "token=${LONG_PRIVATE_TOKEN_NAME}",
+        "api_key=$env:PRIVATE_API_KEY_VALUE",
+        "client_secret=%CLIENT_SECRET_VALUE%",
+        'authorization="${AUTHORIZATION_VALUE}"',
+        "credential={{ secrets.RUNTIME_CREDENTIAL }}",
+        "private_key=`${process.env.PRIVATE_KEY}`",
+      ].join("\n"),
+    );
+
+    expect(await scanStoreForSecrets(root)).toEqual([]);
+  });
+
+  it("keeps detecting quoted and credible unquoted credential literals", async () => {
+    const root = await tempRoot();
+    await writeFile(
+      join(root, "credentials.yaml"),
+      [
+        'password: "quoted-private-password-value"',
+        "api_key=extension-independent-private-value",
+        "--token=generic-private-token-value-1234567890",
+      ].join("\n"),
+    );
+
+    const findings = await scanStoreForSecrets(root);
+
+    expect(findings).toEqual(expect.arrayContaining([
+      { path: "credentials.yaml", line: 1, rule: "literal-secret-field" },
+      { path: "credentials.yaml", line: 2, rule: "literal-secret-field" },
+      { path: "credentials.yaml", line: 3, rule: "literal-secret-field" },
+    ]));
+  });
+
   it("detects URL credentials embedded in executable text", async () => {
     const root = await tempRoot();
     await writeFile(

@@ -106,7 +106,7 @@ harness-sync git connect git@github.com:you/private-harness.git
 harness-sync git sync --push
 ```
 
-Git operations use the system `git` executable with `shell: false`, so SSH agents and OS credential helpers work without the daemon storing tokens. A built-in secret scan checks every regular store file up to 2 MiB regardless of extension, blocks obvious credential literals unless explicitly overridden, and treats larger, unreadable, non-regular, or symlink entries as blocking findings. Explicit runtime/private roots are excluded, and those paths are refused by Git even if an existing `.gitignore` is wrong. Local changes are frozen with Git's staged-tree primitives, validated from that immutable candidate commit, and activated with an expected-parent ref update so a concurrent `HEAD` change cannot swap in an unreviewed tree.
+Git operations use the system `git` executable with `shell: false`, so SSH agents and OS credential helpers work without the daemon storing tokens. A built-in secret scan checks every regular store file up to 2 MiB regardless of extension, blocks obvious credential literals unless explicitly overridden, and treats larger, unreadable, non-regular, symlink, or NUL-containing (binary) entries as blocking findings. Explicit runtime/private roots are excluded, and those paths are refused by Git even if an existing `.gitignore` is wrong. Local changes are frozen with Git's staged-tree primitives, validated from that immutable candidate commit, and activated with an expected-parent ref update so a concurrent `HEAD` change cannot swap in an unreviewed tree.
 
 Remote changes are fetch-only by default. Review them, then accept them explicitly:
 

@@ -42,7 +42,7 @@ env:
   GITHUB_TOKEN: ${env:GITHUB_TOKEN}
 ```
 
-The scanner also blocks common high-confidence credential formats before `git sync`. It examines every regular file in the canonical store up to 2 MiB regardless of filename extension. Files over that limit and unreadable, non-regular, or symlink entries are blocking findings rather than silent exclusions. Only the root runtime/private paths `.local/`, `backups/`, `conflicts/`, `.state.json`, `.managed.json`, and `.lock`, plus Git metadata directories, are excluded. Redaction is intentionally conservative and is not a substitute for a dedicated secret scanner in CI.
+The scanner also blocks common high-confidence credential formats before `git sync`. It examines every regular file in the canonical store up to 2 MiB regardless of filename extension. Files over that limit and unreadable, non-regular, symlink, or NUL-containing (binary) entries are blocking findings rather than silent exclusions. Only the root runtime/private paths `.local/`, `backups/`, `conflicts/`, `.state.json`, `.managed.json`, and `.lock`, plus Git metadata directories, are excluded. Redaction is intentionally conservative and is not a substitute for a dedicated secret scanner in CI.
 
 ## Takeover and rollback
 

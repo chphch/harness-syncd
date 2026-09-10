@@ -19,6 +19,15 @@ const EXCLUDED_FILES = new Set([
   ".state.json",
 ]);
 const MAX_SCANNED_FILE_BYTES = 2 * 1024 * 1024;
+const MIN_LITERAL_SECRET_LENGTH = 12;
+const SECRET_FIELD_NAME =
+  "(?:api[_-]?key|access[_-]?token|client[_-]?secret|token|secret|password|passwd|authorization|credential|private[_-]?key|cookie|session[_-]?key)";
+// Any non-alphanumeric prefix, so that a field name embedded in a compound key
+// (db_password, config.password, openai_api_key) is still recognised.
+const SECRET_FIELD_ASSIGNMENT = new RegExp(
+  `(?:^|[^A-Za-z\\d])(?:(["'])${SECRET_FIELD_NAME}\\1|${SECRET_FIELD_NAME})\\s*[=:]\\s*`,
+  "giu",
+);
 
 const RULES: Array<{ name: string; pattern: RegExp }> = [
   { name: "private-key", pattern: /-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----/u },
@@ -55,11 +64,6 @@ const RULES: Array<{ name: string; pattern: RegExp }> = [
     pattern:
       /(?:^|\s)--?(?:api[-_]?key|token|access[-_]?token|password|passwd|secret|authorization|credential|private[-_]?key|cookie|session[-_]?key)(?:=|\s+)["']?(?!\$\{(?:env:)?[A-Z_][A-Z0-9_]*\})[^\s"',}\];|&]{12,}/iu,
   },
-  {
-    name: "literal-secret-field",
-    pattern:
-      /["']?(?:api[_-]?key|access[_-]?token|client[_-]?secret|token|secret|password|passwd|authorization|credential|private[_-]?key|cookie|session[_-]?key)["']?\s*[=:]\s*["']?(?!\$\{(?:env:)?[A-Z_][A-Z0-9_]*\})[^\s"',}\]]{12,}/iu,
-  },
 ];
 
 export async function scanStoreForSecrets(storeDir: string): Promise<SecretFinding[]> {
@@ -81,7 +85,12 @@ export async function scanStoreForSecrets(storeDir: string): Promise<SecretFindi
         findings.push({ path: file, line: 0, rule: "oversized-text-file" });
         continue;
       }
-      input = await handle.readFile("utf8");
+      const bytes = await handle.readFile();
+      if (bytes.includes(0)) {
+        findings.push({ path: file, line: 0, rule: "binary-file-not-scanned" });
+        continue;
+      }
+      input = bytes.toString("utf8");
     } catch {
       findings.push({ path: file, line: 0, rule: "unreadable-text-file" });
       continue;
@@ -94,6 +103,9 @@ export async function scanStoreForSecrets(storeDir: string): Promise<SecretFindi
           findings.push({ path: file, line: index + 1, rule: rule.name });
         }
       }
+      if (hasLiteralSecretField(line)) {
+        findings.push({ path: file, line: index + 1, rule: "literal-secret-field" });
+      }
     }
   }
   return findings.sort((left, right) =>
@@ -101,6 +113,59 @@ export async function scanStoreForSecrets(storeDir: string): Promise<SecretFindi
     left.line - right.line ||
     left.rule.localeCompare(right.rule),
   );
+}
+
+function hasLiteralSecretField(line: string): boolean {
+  for (const match of line.matchAll(SECRET_FIELD_ASSIGNMENT)) {
+    const remainder = line.slice((match.index ?? 0) + match[0].length);
+    if (hasLiteralSecretValue(remainder)) return true;
+  }
+  return false;
+}
+
+function hasLiteralSecretValue(input: string): boolean {
+  const quote = input[0];
+  if (quote === '"' || quote === "'") {
+    const value = readQuotedValue(input, quote);
+    return value !== null &&
+      value.length >= MIN_LITERAL_SECRET_LENGTH &&
+      !containsDynamicReference(value);
+  }
+
+  const candidate = /^[^\s"',}\];|&]+/u.exec(input)?.[0];
+  if (candidate === undefined || candidate.length < MIN_LITERAL_SECRET_LENGTH) {
+    return false;
+  }
+  if (containsDynamicReference(candidate) || /[()[\]{}<>`]/u.test(candidate)) {
+    return false;
+  }
+  // Digit-free only: a bare identifier reads as code, but letters interleaved
+  // with digits (abc123def456ghi789) is a credible secret rather than a name.
+  if (/^[A-Za-z_$][A-Za-z_$]*$/u.test(candidate)) return false;
+  if (/^[A-Za-z_$][A-Za-z\d_$]*(?:\??\.[A-Za-z_$][A-Za-z\d_$]*)+$/u.test(candidate)) {
+    return false;
+  }
+  return true;
+}
+
+function readQuotedValue(input: string, quote: '"' | "'"): string | null {
+  let escaped = false;
+  for (let index = 1; index < input.length; index += 1) {
+    const character = input[index];
+    if (escaped) {
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === quote) {
+      return input.slice(1, index);
+    }
+  }
+  return null;
+}
+
+function containsDynamicReference(value: string): boolean {
+  return /\$\{[^}]+\}|\$\([^)]+\)|\$env:[A-Za-z_][A-Za-z\d_]*|\$[A-Za-z_][A-Za-z\d_]*|%[A-Za-z_][A-Za-z\d_]*%|\{\{[^}]+\}\}|<%[^%]+%>/iu
+    .test(value);
 }
 
 async function listScannableEntries(
