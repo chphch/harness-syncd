@@ -652,6 +652,15 @@ async function resolveCommit(storeDir: string, reference: string): Promise<strin
   return result.stdout.trim();
 }
 
+/** A canonical skill is staged as a whole directory with --force, so an
+ * interpreter cache or vendored dependency tree that grew inside it would be
+ * committed even though .gitignore names it. These are never canonical. */
+const GENERATED_PATH_EXCLUSIONS = [
+  ":(exclude)**/__pycache__/**",
+  ":(exclude)**/node_modules/**",
+  ":(exclude)**/.pytest_cache/**",
+];
+
 async function stageStoreChanges(
   storeDir: string,
   requiredPaths: readonly string[],
@@ -694,7 +703,7 @@ async function stageStoreChanges(
     if (chunk.length > 0) {
       await runGit(
         storeDir,
-        ["add", "--force", "--", ...chunk],
+        ["add", "--force", "--", ...chunk, ...GENERATED_PATH_EXCLUSIONS],
         "stage required canonical files",
       );
     }

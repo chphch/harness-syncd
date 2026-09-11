@@ -75,6 +75,35 @@ describe.skipIf(!GIT_AVAILABLE)("Git store sync", () => {
     expect(second.status.upstream).toBe("origin/main");
   });
 
+
+  it("never commits a generated cache that grew inside a required skill", async () => {
+    const root = await makeTempRoot();
+    const store = join(root, "store");
+    await initStoreGit(store, "main");
+    configureIdentity(store);
+    await writeFile(join(store, "harness.yaml"), "schemaVersion: 1\n", "utf8");
+    await writeFile(join(store, ".gitignore"), "__pycache__/\nnode_modules/\n", "utf8");
+    await mkdir(join(store, "skills", "demo", "__pycache__"), { recursive: true });
+    await mkdir(join(store, "skills", "demo", "deps", "node_modules"), { recursive: true });
+    await writeFile(join(store, "skills", "demo", "SKILL.md"), "---\nname: demo\n---\nbody\n");
+    await writeFile(join(store, "skills", "demo", "__pycache__", "x.pyc"), "cache\n");
+    await writeFile(join(store, "skills", "demo", "deps", "node_modules", "y.js"), "dep\n");
+
+    // the skill is a required canonical path, so it is staged with --force
+    await syncGitStore(store, {
+      branch: "main",
+      remote: "origin",
+      commitMessage: "with a skill bundle",
+      push: false,
+      requiredPaths: ["harness.yaml", "skills/demo"],
+    });
+
+    const tracked = git(store, ["ls-files"]).split("\n").filter(Boolean);
+    expect(tracked).toContain("skills/demo/SKILL.md");
+    expect(tracked.filter((path) => path.includes("__pycache__"))).toEqual([]);
+    expect(tracked.filter((path) => path.includes("node_modules"))).toEqual([]);
+  });
+
   it("validates the exact staged tree before moving the branch", async () => {
     const root = await makeTempRoot();
     const store = join(root, "store");
