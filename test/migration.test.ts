@@ -2324,3 +2324,70 @@ describe("Claude migration", () => {
       .not.toContain(literal);
   });
 });
+
+describe("link mode switching", () => {
+  async function seedProject(prefix: string) {
+    const root = await mkdtemp(join(tmpdir(), prefix));
+    roots.push(root);
+    const project = await initializeProject(root);
+    await mkdir(join(project.storeDir, "skills", "demo", "references"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(project.storeDir, "skills", "demo", "SKILL.md"),
+      "---\nname: demo\ndescription: demo skill\n---\n\nbody\n",
+      "utf8",
+    );
+    await writeFile(
+      join(project.storeDir, "skills", "demo", "references", "notes.md"),
+      "note\n",
+      "utf8",
+    );
+    const harness = await loadHarness(project.storeDir);
+    harness.skills.push({ name: "demo", path: "skills/demo" });
+    await writeHarness(project.storeDir, harness);
+    return { root, project, harness: await loadHarness(project.storeDir) };
+  }
+
+  it("replaces managed symlinks with copies when the mode changes, without --force", async () => {
+    const { root, project, harness } = await seedProject("harness-sync-linkmode-copy-");
+    await applyHarness(project, harness, { dryRun: false, force: false });
+    expect((await lstat(join(root, "CLAUDE.md"))).isSymbolicLink()).toBe(true);
+
+    project.config.sync.linkMode = "copy";
+    const results = await applyHarness(project, harness, { dryRun: false, force: false });
+
+    expect(results.flatMap((result) => result.skipped)).toEqual([]);
+    expect((await lstat(join(root, "CLAUDE.md"))).isSymbolicLink()).toBe(false);
+    expect(await readFile(join(root, "CLAUDE.md"), "utf8")).toContain("#");
+    expect(await pathExists(join(root, ".claude", "skills", "demo", "references", "notes.md")))
+      .toBe(true);
+    expect((await lstat(join(root, ".claude", "skills", "demo"))).isDirectory()).toBe(true);
+  });
+
+  it("restores symlinks from managed copies when the mode changes back", async () => {
+    const { root, project, harness } = await seedProject("harness-sync-linkmode-link-");
+    project.config.sync.linkMode = "copy";
+    await applyHarness(project, harness, { dryRun: false, force: false });
+    expect((await lstat(join(root, "CLAUDE.md"))).isSymbolicLink()).toBe(false);
+
+    project.config.sync.linkMode = "symlink";
+    const results = await applyHarness(project, harness, { dryRun: false, force: false });
+
+    expect(results.flatMap((result) => result.skipped)).toEqual([]);
+    expect((await lstat(join(root, "CLAUDE.md"))).isSymbolicLink()).toBe(true);
+    expect(await readlink(join(root, "CLAUDE.md"))).toContain("instructions");
+  });
+
+  it("still refuses an occupant it does not own, and keeps it", async () => {
+    const { root, project, harness } = await seedProject("harness-sync-linkmode-foreign-");
+    await applyHarness(project, harness, { dryRun: false, force: false });
+    await rm(join(root, "CLAUDE.md"), { force: true });
+    await writeFile(join(root, "CLAUDE.md"), "hand written\n", "utf8");
+
+    const results = await applyHarness(project, harness, { dryRun: false, force: false });
+
+    expect(results.flatMap((result) => result.skipped)).toContain(join(root, "CLAUDE.md"));
+    expect(await readFile(join(root, "CLAUDE.md"), "utf8")).toBe("hand written\n");
+  });
+});

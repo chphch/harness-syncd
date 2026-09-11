@@ -240,10 +240,13 @@ export class ManagedWriter {
     if (this.options.linkMode === "symlink") {
       return this.link(source, destination);
     }
-    await this.assertDistinctSourceAndDestination(source, destination);
+    // allowExistingTargetLink: in a symlink→copy switch the destination still
+    // resolves to the source, which would otherwise read as the same path.
+    await this.assertDistinctSourceAndDestination(source, destination, true);
     await this.assertSafeDestination(destination);
     if (!(await this.canReplace(destination))) return false;
-    const observed = (await pathExists(destination))
+    const wasManagedLink = await this.clearManagedLink(source, destination);
+    const observed = !wasManagedLink && (await pathExists(destination))
       ? await hashPath(destination)
       : null;
     await this.assertNativePrecondition(destination, observed);
@@ -276,10 +279,11 @@ export class ManagedWriter {
     if (this.options.linkMode === "symlink") {
       return this.link(source, destination);
     }
-    await this.assertDistinctSourceAndDestination(source, destination);
+    await this.assertDistinctSourceAndDestination(source, destination, true);
     await this.assertSafeDestination(destination);
     if (!(await this.canReplace(destination))) return false;
-    const observed = (await pathExists(destination))
+    const wasManagedLink = await this.clearManagedLink(source, destination);
+    const observed = !wasManagedLink && (await pathExists(destination))
       ? await hashPath(destination)
       : null;
     await this.assertNativePrecondition(destination, observed);
@@ -330,13 +334,21 @@ export class ManagedWriter {
     }
 
     let result = await ensureRelativeSymlink(source, destination);
-    if (result === "occupied" && this.options.force) {
+    if (result === "occupied") {
+      // The occupant is ours when the ledger's recorded hash still matches —
+      // a copy→symlink mode change. Backing it up keeps the content recoverable.
       const occupiedHash = await hashPath(destination);
-      await this.assertNativePrecondition(destination, occupiedHash);
-      await this.backup(destination, occupiedHash);
-      result = await ensureRelativeSymlink(source, destination);
+      const ownedCopy = this.registry.files[destination] === occupiedHash;
+      if (this.options.force || ownedCopy) {
+        await this.assertNativePrecondition(destination, occupiedHash);
+        await this.backup(destination, occupiedHash);
+        result = await ensureRelativeSymlink(source, destination);
+      }
     }
     if (result === "occupied") {
+      // Retain it: finish() prunes every owned path it was not told about, so a
+      // skipped destination would otherwise be moved into the backup tree.
+      this.retain(destination);
       this.skip(destination, "destination exists and is not the expected managed link");
       return false;
     }
@@ -355,8 +367,32 @@ export class ManagedWriter {
     if (this.options.force) return true;
     const prior = this.registry.files[path];
     if (prior && prior === (await hashPath(path))) return true;
+    // A projection this writer owns may be re-materialised in the other link
+    // mode. Ownership is proven by the ledger, so no --force is needed.
+    const priorLink = this.registry.links[path];
+    if (priorLink && (await symlinkPointsTo(path, priorLink))) return true;
     this.skip(path, "destination changed outside harness-sync; use import or --force");
     return false;
+  }
+
+  /** True when `destination` is the managed symlink this writer previously
+   * created for `source` — the shape a symlink→copy mode change has to undo. */
+  private async isManagedLinkFor(source: string, destination: string): Promise<boolean> {
+    const recorded = this.registry.links[destination];
+    if (recorded === undefined) return false;
+    if (resolve(recorded) !== resolve(source)) return false;
+    return symlinkPointsTo(destination, source);
+  }
+
+  /** Clear a managed symlink so the copy writers see an empty destination.
+   * Returns true when the destination should be treated as absent. */
+  private async clearManagedLink(source: string, destination: string): Promise<boolean> {
+    if (!(await this.isManagedLinkFor(source, destination))) return false;
+    if (!this.options.dryRun) {
+      await rm(destination, { force: true });
+      delete this.registry.links[destination];
+    }
+    return true;
   }
 
   private acceptObservedHash(path: string, observed: string | null): boolean {
