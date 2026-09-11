@@ -168,17 +168,21 @@ export class ManagedWriter {
       await this.assertNativePrecondition(path, observedBeforePrune);
       let unchanged = false;
       let expectedHash: string | undefined;
-      if (path in this.registry.links) {
+      if (!existsBeforePrune) {
+        // Already gone, so there is nothing to remove and nothing to back up.
+        // This has to be tested before the per-kind branches: a recorded link
+        // whose path is absent fails symlinkPointsTo, which used to read as
+        // "changed outside harness-sync" and left the entry unprunable for good.
+        unchanged = true;
+      } else if (path in this.registry.links) {
         unchanged = await symlinkPointsTo(path, this.registry.links[path]!);
         if (unchanged) {
           expectedHash = await hashPath(path);
           unchanged = await symlinkPointsTo(path, this.registry.links[path]!);
         }
-      } else if (path in this.registry.files && (await pathExists(path))) {
+      } else if (path in this.registry.files) {
         expectedHash = this.registry.files[path]!;
         unchanged = expectedHash === (await hashPath(path));
-      } else if (!(await pathExists(path))) {
-        unchanged = true;
       }
       if (!unchanged) {
         this.skip(path, "stale managed output changed outside harness-sync; not removed");

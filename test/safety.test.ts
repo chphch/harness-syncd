@@ -640,6 +640,48 @@ describe("projection safety", () => {
     );
   });
 
+
+  it("prunes a managed entry whose path is already gone", async () => {
+    const root = await tempRoot();
+    await mkdir(join(root, "skills", "demo"), { recursive: true });
+    await writeFile(join(root, "skills", "demo", "SKILL.md"), "---\nname: demo\n---\nbody\n");
+    const native = join(root, "native");
+    await mkdir(native, { recursive: true });
+
+    const first = new ManagedWriter({
+      storeDir: root,
+      target: "claude",
+      linkMode: "symlink",
+      dryRun: false,
+      force: false,
+      allowedRoot: native,
+    });
+    await first.load();
+    await first.file(join(root, "skills", "demo", "SKILL.md"), join(native, "CLAUDE.md"));
+    await first.finish();
+    expect(await pathExists(join(native, "CLAUDE.md"))).toBe(true);
+
+    // Whatever removed it, the ledger still claims it. A second writer that no
+    // longer declares the path must be able to retire the claim.
+    await rm(join(native, "CLAUDE.md"), { force: true });
+    const second = new ManagedWriter({
+      storeDir: root,
+      target: "claude",
+      linkMode: "symlink",
+      dryRun: false,
+      force: false,
+      allowedRoot: native,
+    });
+    await second.load();
+    await second.finish();
+
+    expect(second.skipped).toEqual([]);
+    expect(second.removed).toContain(join(native, "CLAUDE.md"));
+    const ledger = JSON.parse(await readFile(join(root, ".managed.json"), "utf8"));
+    expect(ledger.links?.[join(native, "CLAUDE.md")]).toBeUndefined();
+    expect(ledger.files?.[join(native, "CLAUDE.md")]).toBeUndefined();
+  });
+
   it("reports NUL-containing regular files instead of silently skipping them", async () => {
     const root = await tempRoot();
     await writeFile(
