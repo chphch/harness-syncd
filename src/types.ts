@@ -104,6 +104,8 @@ export interface TargetOverlay {
   metadata?: Record<string, unknown>;
 }
 
+import type { SecretAllowlistEntry } from "./core/secret-allowlist.js";
+
 export interface CanonicalHarness {
   schemaVersion: 1;
   metadata: {
@@ -128,6 +130,9 @@ export interface CanonicalHarness {
   mcpServers: Record<string, McpServer>;
   permissions: PortablePermissions;
   hooks: Record<string, HookGroup[]>;
+  /** Reviewed, committed approvals of individual scanned lines. Optional so an
+   * existing store's harness.yaml keeps parsing and is not rewritten. */
+  secretAllowlist?: SecretAllowlistEntry[];
   overlays: Record<TargetName, TargetOverlay>;
 }
 

@@ -28,7 +28,12 @@ import {
   pathExists,
   snapshotNativePaths,
 } from "../src/core/fs.js";
-import { scanStoreForSecrets } from "../src/core/secret-scan.js";
+import { hashScannedLine, scanStoreForSecrets } from "../src/core/secret-scan.js";
+import {
+  assertSecretAllowlist,
+  normalizeSecretAllowlist,
+  partitionByAllowlist,
+} from "../src/core/secret-allowlist.js";
 import { initializeProject } from "../src/core/project.js";
 import { migrateFrom } from "../src/core/migrate.js";
 import { validateHarness } from "../src/core/validate.js";
@@ -613,7 +618,7 @@ describe("projection safety", () => {
     await writeFile(join(root, "large.txt"), "x".repeat(2_100_000));
 
     expect(await scanStoreForSecrets(root)).toEqual([
-      { path: "large.txt", line: 0, rule: "oversized-text-file" },
+      expect.objectContaining({ path: "large.txt", line: 0, rule: "oversized-text-file" }),
     ]);
   });
 
@@ -701,7 +706,7 @@ describe("projection safety", () => {
     );
 
     expect(await scanStoreForSecrets(root)).toEqual([
-      { path: "compiled.pyc", line: 0, rule: "binary-file-not-scanned" },
+      expect.objectContaining({ path: "compiled.pyc", line: 0, rule: "binary-file-not-scanned" }),
     ]);
   });
 
@@ -731,7 +736,7 @@ describe("projection safety", () => {
     );
 
     expect(await scanStoreForSecrets(root)).toEqual([
-      { path: "sneaky.md", line: 0, rule: "binary-file-not-scanned" },
+      expect.objectContaining({ path: "sneaky.md", line: 0, rule: "binary-file-not-scanned" }),
     ]);
   });
 
@@ -747,9 +752,9 @@ describe("projection safety", () => {
     );
 
     expect(await scanStoreForSecrets(root)).toEqual([
-      { path: "compound.yaml", line: 1, rule: "literal-secret-field" },
-      { path: "compound.yaml", line: 2, rule: "literal-secret-field" },
-      { path: "compound.yaml", line: 3, rule: "literal-secret-field" },
+      expect.objectContaining({ path: "compound.yaml", line: 1, rule: "literal-secret-field" }),
+      expect.objectContaining({ path: "compound.yaml", line: 2, rule: "literal-secret-field" }),
+      expect.objectContaining({ path: "compound.yaml", line: 3, rule: "literal-secret-field" }),
     ]);
   });
 
@@ -771,7 +776,7 @@ describe("projection safety", () => {
     await writeFile(join(root, "alnum.env"), "api_key=abc123def456ghi789\n");
 
     expect(await scanStoreForSecrets(root)).toEqual([
-      { path: "alnum.env", line: 1, rule: "literal-secret-field" },
+      expect.objectContaining({ path: "alnum.env", line: 1, rule: "literal-secret-field" }),
     ]);
   });
 
@@ -829,9 +834,9 @@ describe("projection safety", () => {
     const findings = await scanStoreForSecrets(root);
 
     expect(findings).toEqual(expect.arrayContaining([
-      { path: "credentials.yaml", line: 1, rule: "literal-secret-field" },
-      { path: "credentials.yaml", line: 2, rule: "literal-secret-field" },
-      { path: "credentials.yaml", line: 3, rule: "literal-secret-field" },
+      expect.objectContaining({ path: "credentials.yaml", line: 1, rule: "literal-secret-field" }),
+      expect.objectContaining({ path: "credentials.yaml", line: 2, rule: "literal-secret-field" }),
+      expect.objectContaining({ path: "credentials.yaml", line: 3, rule: "literal-secret-field" }),
     ]));
   });
 
@@ -1073,3 +1078,119 @@ async function tempRoot(): Promise<string> {
   roots.push(root);
   return root;
 }
+
+describe("secret scan allowlist", () => {
+  const PLACEHOLDER = 'export API_TOKEN="your-token-here"';
+  const REAL = 'export API_TOKEN="Zk8sQ1vB3nM7pL0aX2c4"';
+
+  function entry(path: string, line: string, reason = "docs placeholder") {
+    return {
+      path,
+      rule: "literal-secret-field",
+      lineHash: hashScannedLine(line),
+      reason,
+    };
+  }
+
+  it("approves only the exact line it was written for", async () => {
+    const root = await tempRoot();
+    await writeFile(join(root, "docs.md"), `${PLACEHOLDER}\n`);
+    const findings = await scanStoreForSecrets(root);
+    expect(findings).toHaveLength(1);
+
+    const partition = partitionByAllowlist(findings, [entry("docs.md", PLACEHOLDER)]);
+
+    expect(partition.blocking).toEqual([]);
+    expect(partition.allowed).toHaveLength(1);
+    expect(partition.stale).toEqual([]);
+  });
+
+  it("stops approving once the approved line becomes a real credential", async () => {
+    const root = await tempRoot();
+    await writeFile(join(root, "docs.md"), `${REAL}\n`);
+    const findings = await scanStoreForSecrets(root);
+
+    // the entry still names the placeholder, so it must not cover this
+    const partition = partitionByAllowlist(findings, [entry("docs.md", PLACEHOLDER)]);
+
+    expect(partition.blocking).toHaveLength(1);
+    expect(partition.allowed).toEqual([]);
+    expect(partition.stale).toHaveLength(1);
+  });
+
+  it("does not let an approval slide onto whatever moved into its line number", async () => {
+    const root = await tempRoot();
+    // two unrelated lines inserted above; the placeholder moves to line 3 and a
+    // real credential lands on the old line 1
+    await writeFile(join(root, "docs.md"), `${REAL}\n# note\n${PLACEHOLDER}\n`);
+    const findings = await scanStoreForSecrets(root);
+
+    const partition = partitionByAllowlist(findings, [entry("docs.md", PLACEHOLDER)]);
+
+    expect(partition.allowed.map((finding) => finding.line)).toEqual([3]);
+    expect(partition.blocking.map((finding) => finding.line)).toEqual([1]);
+  });
+
+  it("does not approve a new credential elsewhere in the same file", async () => {
+    const root = await tempRoot();
+    await writeFile(join(root, "docs.md"), `${PLACEHOLDER}\n${REAL}\n`);
+
+    const partition = partitionByAllowlist(
+      await scanStoreForSecrets(root),
+      [entry("docs.md", PLACEHOLDER)],
+    );
+
+    expect(partition.allowed).toHaveLength(1);
+    expect(partition.blocking).toHaveLength(1);
+    expect(partition.blocking[0]!.line).toBe(2);
+  });
+
+  it("cannot approve a whole-file finding, which carries no line hash", async () => {
+    const root = await tempRoot();
+    await writeFile(
+      join(root, "compiled.pyc"),
+      Buffer.concat([Buffer.from([0x42, 0x00]), Buffer.from("password=literal-value-1234\n")]),
+    );
+    const findings = await scanStoreForSecrets(root);
+    expect(findings[0]!.rule).toBe("binary-file-not-scanned");
+    expect(findings[0]!.lineHash).toBeUndefined();
+
+    const partition = partitionByAllowlist(findings, [
+      { path: "compiled.pyc", rule: "binary-file-not-scanned", lineHash: "0".repeat(64), reason: "x" },
+    ]);
+
+    expect(partition.blocking).toHaveLength(1);
+  });
+
+  it("hashes the same content alike in LF and CRLF files", () => {
+    expect(hashScannedLine(PLACEHOLDER)).toBe(hashScannedLine(`${PLACEHOLDER}\r`));
+    expect(hashScannedLine(PLACEHOLDER)).not.toBe(hashScannedLine(`${PLACEHOLDER} `));
+  });
+
+  it("refuses a malformed entry instead of approving nothing or everything", () => {
+    const cases: Array<[unknown, RegExp]> = [
+      ["not an array", /expected an array/u],
+      [[{ path: "a", rule: "literal-secret-field", lineHash: "short", reason: "r" }], /lineHash/u],
+      [[{ path: "a", rule: "literal-secret-field", lineHash: "a".repeat(64), reason: "  " }], /reason/u],
+      [[{ path: "a", rule: "literal-secret-field", lineHash: "a".repeat(64), reason: "r", extra: 1 }], /unknown field/u],
+    ];
+    for (const [value, pattern] of cases) {
+      expect(() => normalizeSecretAllowlist(value)).toThrow(pattern);
+    }
+  });
+
+  it("refuses a rule that is unknown, structural, or duplicated", () => {
+    const base = { path: "a.md", lineHash: "a".repeat(64), reason: "r" };
+    expect(() => assertSecretAllowlist([{ ...base, rule: "literal-secret-fields" }]))
+      .toThrow(/unknown rule/u);
+    expect(() => assertSecretAllowlist([{ ...base, rule: "oversized-text-file" }]))
+      .toThrow(/cannot be pre-approved/u);
+    expect(() => assertSecretAllowlist([
+      { ...base, rule: "literal-secret-field" },
+      { ...base, rule: "literal-secret-field" },
+    ])).toThrow(/duplicate entry/u);
+    expect(() => assertSecretAllowlist([
+      { ...base, path: "../escape.md", rule: "literal-secret-field" },
+    ])).toThrow(/store-relative/u);
+  });
+});

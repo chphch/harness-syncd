@@ -43,6 +43,11 @@ import {
 } from "./core/registry.js";
 import { establishBaseline, reconcileOnce } from "./core/reconcile.js";
 import { scanStoreForSecrets } from "./core/secret-scan.js";
+import {
+  partitionByAllowlist,
+  type AllowlistPartition,
+  type SecretAllowlistEntry,
+} from "./core/secret-allowlist.js";
 import { hashCanonical, readState } from "./core/state.js";
 import { acquireLock, pathExists } from "./core/fs.js";
 import { driftedManagedPaths } from "./core/writer.js";
@@ -530,13 +535,22 @@ git
         }
         const localHarness = await loadHarness(project.storeDir);
         await validateHarness(project.storeDir, localHarness);
-        await assertSecretScan(project.storeDir, options.allowSecrets === true);
+        const allowlist = localHarness.secretAllowlist ?? [];
+        const secretScan = await assertSecretScan(
+          project.storeDir,
+          options.allowSecrets === true,
+          allowlist,
+        );
         const validateGitCandidate = async (candidateStoreDir: string) => {
           const candidateHarness = await loadHarness(candidateStoreDir);
           await validateHarness(candidateStoreDir, candidateHarness);
+          // Deliberately the LIVE allowlist, not the candidate's: a fetched
+          // commit must not be able to carry both a new secret and its own
+          // approval for it.
           await assertSecretScan(
             candidateStoreDir,
             options.allowSecrets === true,
+            allowlist,
           );
         };
         const gitResult = await syncGitStore(project.storeDir, {
@@ -551,6 +565,14 @@ git
         });
         print({
           git: gitResult,
+          secretScan: {
+            blocked: secretScan.blocking.length,
+            allowlisted: secretScan.allowed.length,
+            staleEntries: secretScan.stale,
+            ...(options.allowSecrets === true && secretScan.blocking.length > 0
+              ? { bypassedByFlag: secretScan.blocking }
+              : {}),
+          },
           reconcileBefore: before,
           projectionPending: gitResult.fastForwarded || gitResult.rebased,
           reviewCommand: gitResult.remoteChangesPending && gitResult.reviewCommit
@@ -601,8 +623,11 @@ program
       }),
     );
     const nativeOk = nativeChecks.every((check) => check.ok);
+    // Findings stay reported in full — an approval changes the verdict, never
+    // what the diagnostic shows. A stale entry is its own red flag.
+    const partition = partitionByAllowlist(findings, harness.secretAllowlist ?? []);
     print({
-      ok: findings.length === 0 && nativeOk,
+      ok: partition.blocking.length === 0 && partition.stale.length === 0 && nativeOk,
       node: process.version,
       config: project.configPath,
       store: project.storeDir,
@@ -614,8 +639,12 @@ program
       },
       nativeChecks,
       secretFindings: findings,
+      secretAllowlisted: partition.allowed.length,
+      secretAllowlistStale: partition.stale,
     });
-    if (findings.length > 0 || !nativeOk) process.exitCode = 2;
+    if (partition.blocking.length > 0 || partition.stale.length > 0 || !nativeOk) {
+      process.exitCode = 2;
+    }
   });
 
 program.parseAsync().catch((error: unknown) => {
@@ -799,12 +828,24 @@ function print(value: unknown): void {
   }
 }
 
-async function assertSecretScan(storeDir: string, allowSecrets: boolean): Promise<void> {
+async function assertSecretScan(
+  storeDir: string,
+  allowSecrets: boolean,
+  allowlist: readonly SecretAllowlistEntry[] = [],
+): Promise<AllowlistPartition> {
   const findings = await scanStoreForSecrets(storeDir);
-  if (findings.length === 0 || allowSecrets) return;
+  const partition = partitionByAllowlist(findings, allowlist);
+  if (partition.blocking.length === 0 || allowSecrets) return partition;
   throw new Error(
-    `Secret scan blocked Git sync: ${findings
-      .map((finding) => `${finding.path}:${finding.line} (${finding.rule})`)
-      .join(", ")}. Replace literals with environment references or pass --allow-secrets explicitly.`,
+    `Secret scan blocked Git sync: ${partition.blocking
+      .map((finding) =>
+        `${finding.path}:${finding.line} (${finding.rule}` +
+        `${finding.lineHash === undefined ? "" : `, lineHash ${finding.lineHash}`})`)
+      .join(", ")}. Replace literals with environment references, add a reviewed ` +
+      "harness.yaml secretAllowlist entry for that exact lineHash, or pass --allow-secrets " +
+      `explicitly. Approved by the allowlist this run: ${partition.allowed.length}.` +
+      (partition.stale.length > 0
+        ? ` Stale allowlist entries that match nothing: ${partition.stale.length}.`
+        : ""),
   );
 }

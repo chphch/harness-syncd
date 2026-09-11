@@ -1,4 +1,5 @@
 import { lstat, realpath, readdir } from "node:fs/promises";
+import { assertSecretAllowlist } from "./secret-allowlist.js";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TARGET_NAMES, type CanonicalHarness, type TargetName } from "../types.js";
 import { isRecord } from "./frontmatter.js";
@@ -82,6 +83,7 @@ export async function validateHarness(
   if (!isRecord(harness.instructions) || typeof harness.instructions.root !== "string") {
     throw new Error("Invalid instructions: expected a string root");
   }
+  assertSecretAllowlist(harness.secretAllowlist ?? []);
   if (!Array.isArray(harness.skills) || !Array.isArray(harness.rules)) {
     throw new Error("Invalid harness: skills and rules must be arrays");
   }

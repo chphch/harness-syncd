@@ -94,6 +94,34 @@ Enrollment is deliberately two-factor: a valid controller file must exist and th
 
 Use `manage set <id> --watch false`, `manage set <id> --enabled false`, or `manage remove <id>` to change local enrollment without deleting project files or canonical stores. A missing/offline entry remains visible and removable. See [fleet management](docs/fleet.md) for the registry schema, recovery behavior, and service setup guidance.
 
+## Approving a scanned line
+
+The scan blocks a `git sync` on any finding, which is the wrong default for a
+documentation file whose whole job is to show what a token assignment looks
+like. Record the decision in `harness.yaml` instead of disabling the scan:
+
+```yaml
+secretAllowlist:
+  - path: skills/mcp-integration/references/authentication.md
+    rule: literal-secret-field
+    lineHash: 174ea2e245043d0710dd2443ee5ae71cba6339a4b562e3218cf699cd9b3ac168
+    reason: Docs example of exporting a token; the value is a placeholder.
+```
+
+The `lineHash` is printed by `harness-sync doctor` and by the error that blocked
+the sync. It hashes that line's bytes, so editing the line — including replacing
+the placeholder with a real credential — makes the entry stop matching and the
+finding blocks again. The line NUMBER is deliberately not part of the key: it
+moves whenever anything is inserted above, which would slide the approval onto
+whichever line took its place.
+
+An entry that matches nothing is reported as stale by both `doctor` (which then
+exits non-zero) and every `git sync`. It cannot hide anything — it covers no
+finding — but it is noise, so delete it.
+
+`harness.yaml` itself is scanned, so quoting a real secret in a `reason` creates
+a new finding rather than smuggling one through.
+
 ## Link mode
 
 Projections are symlinks by default: one canonical copy, and an edit through
@@ -133,7 +161,7 @@ harness-sync git connect git@github.com:you/private-harness.git
 harness-sync git sync --push
 ```
 
-Git operations use the system `git` executable with `shell: false`, so SSH agents and OS credential helpers work without the daemon storing tokens. A built-in secret scan checks every regular store file up to 2 MiB regardless of extension, blocks obvious credential literals unless explicitly overridden, and treats larger, unreadable, non-regular, symlink, or NUL-containing (binary) entries as blocking findings. Explicit runtime/private roots are excluded, and those paths are refused by Git even if an existing `.gitignore` is wrong. Local changes are frozen with Git's staged-tree primitives, validated from that immutable candidate commit, and activated with an expected-parent ref update so a concurrent `HEAD` change cannot swap in an unreviewed tree.
+Git operations use the system `git` executable with `shell: false`, so SSH agents and OS credential helpers work without the daemon storing tokens. A built-in secret scan checks every regular store file up to 2 MiB regardless of extension, blocks obvious credential literals unless a reviewed `harness.yaml` `secretAllowlist` entry pins that exact line or `--allow-secrets` is passed for the run, and treats larger, unreadable, non-regular, symlink, or NUL-containing (binary) entries as blocking findings. Explicit runtime/private roots are excluded, and those paths are refused by Git even if an existing `.gitignore` is wrong. Local changes are frozen with Git's staged-tree primitives, validated from that immutable candidate commit, and activated with an expected-parent ref update so a concurrent `HEAD` change cannot swap in an unreviewed tree.
 
 Remote changes are fetch-only by default. Review them, then accept them explicitly:
 

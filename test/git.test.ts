@@ -9,7 +9,8 @@ import {
   initStoreGit,
   syncGitStore,
 } from "../src/core/git.js";
-import { scanStoreForSecrets } from "../src/core/secret-scan.js";
+import { hashScannedLine, scanStoreForSecrets } from "../src/core/secret-scan.js";
+import { partitionByAllowlist } from "../src/core/secret-allowlist.js";
 
 const GIT_AVAILABLE = spawnSync("git", ["--version"], {
   encoding: "utf8",
@@ -75,6 +76,38 @@ describe.skipIf(!GIT_AVAILABLE)("Git store sync", () => {
     expect(second.status.upstream).toBe("origin/main");
   });
 
+
+
+  it("commits when every finding is matched by a reviewed allowlist entry", async () => {
+    const root = await makeTempRoot();
+    const store = join(root, "store");
+    await initStoreGit(store, "main");
+    configureIdentity(store);
+    const placeholder = 'export API_TOKEN="your-token-here"';
+    await writeFile(join(store, "docs.md"), `${placeholder}\n`, "utf8");
+
+    const findings = await scanStoreForSecrets(store);
+    expect(findings).toHaveLength(1);
+
+    const approved = partitionByAllowlist(findings, [{
+      path: "docs.md",
+      rule: "literal-secret-field",
+      lineHash: hashScannedLine(placeholder),
+      reason: "documentation placeholder, reviewed",
+    }]);
+    expect(approved.blocking).toEqual([]);
+
+    // and the same scan still blocks when the line becomes a real credential
+    await writeFile(join(store, "docs.md"), 'export API_TOKEN="Zk8sQ1vB3nM7pL0aX2c4"\n', "utf8");
+    const after = partitionByAllowlist(await scanStoreForSecrets(store), [{
+      path: "docs.md",
+      rule: "literal-secret-field",
+      lineHash: hashScannedLine(placeholder),
+      reason: "documentation placeholder, reviewed",
+    }]);
+    expect(after.blocking).toHaveLength(1);
+    expect(after.stale).toHaveLength(1);
+  });
 
   it("never commits a generated cache that grew inside a required skill", async () => {
     const root = await makeTempRoot();

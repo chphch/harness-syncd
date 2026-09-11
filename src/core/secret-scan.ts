@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,6 +7,19 @@ export interface SecretFinding {
   path: string;
   line: number;
   rule: string;
+  /** Hash of the offending line, present only on line-level findings. It is
+   * what an allowlist entry pins to, so an approval stops applying the moment
+   * the line's bytes change. File-level findings carry none and therefore
+   * cannot be pre-approved at all. */
+  lineHash?: string;
+}
+
+/** The one normalisation for a scanned line. A single trailing CR is dropped so
+ * the same content hashes alike in LF and CRLF files; nothing else is trimmed,
+ * because two different secrets must never collapse onto one hash. */
+export function hashScannedLine(line: string): string {
+  const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
+  return createHash("sha256").update(normalized, "utf8").digest("hex");
 }
 
 const EXCLUDED_DIRECTORIES = new Set([
@@ -104,13 +118,22 @@ export async function scanStoreForSecrets(storeDir: string): Promise<SecretFindi
       await handle?.close();
     }
     for (const [index, line] of input.split("\n").entries()) {
+      // Hashed from the bytes this scan already read: re-reading the file at
+      // gate time would open a window where the scan saw a credential and the
+      // hash saw a placeholder.
+      const lineHash = hashScannedLine(line);
       for (const rule of RULES) {
         if (rule.pattern.test(line)) {
-          findings.push({ path: file, line: index + 1, rule: rule.name });
+          findings.push({ path: file, line: index + 1, rule: rule.name, lineHash });
         }
       }
       if (hasLiteralSecretField(line)) {
-        findings.push({ path: file, line: index + 1, rule: "literal-secret-field" });
+        findings.push({
+          path: file,
+          line: index + 1,
+          rule: "literal-secret-field",
+          lineHash,
+        });
       }
     }
   }

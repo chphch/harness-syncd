@@ -1,4 +1,5 @@
 import { access, lstat, readFile } from "node:fs/promises";
+import { normalizeSecretAllowlist } from "./secret-allowlist.js";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -321,6 +322,11 @@ function normalizeHarness(
     hooks: isRecord(value.hooks)
       ? (value.hooks as CanonicalHarness["hooks"])
       : {},
+    // Absent stays absent: writing `secretAllowlist: []` back would change the
+    // canonical bytes of every store that never used the feature.
+    ...(value.secretAllowlist === undefined
+      ? {}
+      : { secretAllowlist: normalizeSecretAllowlist(value.secretAllowlist) }),
     overlays: {
       claude: isRecord(overlays.claude) ? overlays.claude : {},
       codex: isRecord(overlays.codex) ? overlays.codex : {},
