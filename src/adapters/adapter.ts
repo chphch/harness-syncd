@@ -30,6 +30,9 @@ export interface CaptureOptions {
   write: boolean;
   /** Restrict daemon inverse-capture to paths already owned by this target. */
   managedPaths?: readonly string[];
+  /** Native skill directory names to drop before import opens them. Set only by
+   * migrate; inverse-capture and doctor leave it undefined and are unaffected. */
+  excludeSkills?: readonly string[];
 }
 
 export interface ApplyOptions {

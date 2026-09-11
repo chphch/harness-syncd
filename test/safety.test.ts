@@ -188,6 +188,7 @@ describe("projection safety", () => {
           install: false,
           includeLocal: false,
           force: false,
+          excludeSkills: [],
         }),
       ).rejects.toThrow(/outside allowed root/u);
     },
@@ -205,6 +206,7 @@ describe("projection safety", () => {
       install: false,
       includeLocal: false,
       force: false,
+      excludeSkills: [],
     })).rejects.toThrow(/nested Git metadata/u);
   });
 
@@ -222,6 +224,7 @@ describe("projection safety", () => {
       install: false,
       includeLocal: false,
       force: false,
+      excludeSkills: [],
     })).rejects.toThrow(/non-regular Markdown file/u);
   });
 
@@ -240,6 +243,7 @@ describe("projection safety", () => {
       install: false,
       includeLocal: false,
       force: false,
+      excludeSkills: [],
     })).rejects.toThrow(/unmanaged symlinked directory/u);
   });
 
@@ -273,6 +277,7 @@ describe("projection safety", () => {
         install: false,
         includeLocal: false,
         force: false,
+        excludeSkills: [],
       })).rejects.toThrow(/non-regular entry/u);
     },
   );
@@ -294,6 +299,7 @@ describe("projection safety", () => {
       install: false,
       includeLocal: false,
       force: false,
+      excludeSkills: [],
     })).rejects.toThrow(/contains a symlink/u);
   });
 
@@ -312,6 +318,7 @@ describe("projection safety", () => {
         install: false,
         includeLocal: false,
         force: false,
+        excludeSkills: [],
       })).rejects.toThrow(/non-regular file/u);
     },
   );
@@ -330,6 +337,7 @@ describe("projection safety", () => {
         install: false,
         includeLocal: false,
         force: false,
+        excludeSkills: [],
       })).rejects.toThrow(/non-regular path/u);
     },
   );
@@ -990,6 +998,7 @@ describe("projection safety", () => {
         install: false,
         includeLocal: false,
         force: false,
+        excludeSkills: [],
       })).rejects.toThrow(/canonical store path contains a symlink/u);
       expect(await readFile(join(victim, "marker"), "utf8")).toBe("untouched\n");
       expect(await pathExists(join(victim, "demo"))).toBe(false);

@@ -82,6 +82,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
 
@@ -175,6 +176,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     let harness = await loadHarness(project.storeDir);
     const antigravity = JSON.parse(
@@ -245,6 +247,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     const claude = JSON.parse(await readFile(join(root, ".mcp.json"), "utf8")) as {
@@ -309,6 +312,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     const claudeSettings = JSON.parse(
@@ -367,6 +371,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     const claudeSettings = JSON.parse(
@@ -424,6 +429,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     const codex = parseToml(
@@ -482,6 +488,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     const codex = parseToml(
@@ -592,6 +599,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
 
@@ -652,6 +660,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     let harness = await loadHarness(project.storeDir);
     const codex = parseToml(
@@ -738,6 +747,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     const codex = parseToml(
@@ -793,12 +803,14 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     await migrateFrom(project, "claude", {
       apply: true,
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     const claudeSettings = JSON.parse(
@@ -853,6 +865,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     const codex = parseToml(
@@ -917,6 +930,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     const codex = parseToml(
@@ -1010,6 +1024,7 @@ describe("Claude migration", () => {
         install: true,
         includeLocal: false,
         force: true,
+        excludeSkills: [],
       });
       const harness = await loadHarness(project.storeDir);
       const codex = parseToml(
@@ -1044,6 +1059,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
 
@@ -1076,6 +1092,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     })).rejects.toThrow(/frontmatter name must be a string/u);
     expect(await readFile(join(project.storeDir, "harness.yaml"), "utf8"))
       .toBe(harnessBefore);
@@ -1106,6 +1123,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     })).rejects.toThrow(/(?:symlink ancestor|unmanaged symlinked directory)/u);
     expect(await readFile(join(project.storeDir, "harness.yaml"), "utf8"))
       .toBe(harnessBefore);
@@ -1125,6 +1143,7 @@ describe("Claude migration", () => {
       install: false,
       includeLocal: false,
       force: false,
+      excludeSkills: [],
     });
 
     expect(result.mode).toBe("plan");
@@ -1150,6 +1169,7 @@ describe("Claude migration", () => {
       install: false,
       includeLocal: true,
       force: false,
+      excludeSkills: [],
     });
     expect(await pathExists(retained)).toBe(false);
 
@@ -1158,6 +1178,7 @@ describe("Claude migration", () => {
       install: false,
       includeLocal: true,
       force: false,
+      excludeSkills: [],
     });
     expect(JSON.parse(await readFile(retained, "utf8"))).toEqual({
       model: "sonnet",
@@ -1191,6 +1212,7 @@ describe("Claude migration", () => {
         install: false,
         includeLocal: false,
         force: false,
+        excludeSkills: [],
       })).rejects.toThrow(/broken\.command/u);
       expect(await readFile(join(project.storeDir, "harness.yaml"), "utf8"))
         .toBe(harnessBefore);
@@ -1222,6 +1244,7 @@ describe("Claude migration", () => {
         install: true,
         includeLocal: false,
         force: true,
+        excludeSkills: [],
       })).rejects.toThrow(message);
       expect(await readFile(join(project.storeDir, "harness.yaml"), "utf8"))
         .toBe(harnessBefore);
@@ -1251,6 +1274,7 @@ describe("Claude migration", () => {
         install: true,
         includeLocal: false,
         force: true,
+        excludeSkills: [],
       })).rejects.toThrow(message);
       expect(await readFile(join(project.storeDir, "harness.yaml"), "utf8"))
         .toBe(harnessBefore);
@@ -1272,6 +1296,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     })).rejects.toThrow(/hooks\.PreToolUse\[0\]\.hooks: expected an array/u);
     expect(await readFile(join(project.storeDir, "harness.yaml"), "utf8"))
       .toBe(harnessBefore);
@@ -1307,6 +1332,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     })).rejects.toThrow(/developer_instructions: expected a string/u);
     expect(await readFile(nativeAgent, "utf8")).toBe(malformed);
     expect(await readFile(join(project.storeDir, "harness.yaml"), "utf8"))
@@ -1325,6 +1351,7 @@ describe("Claude migration", () => {
       install: false,
       includeLocal: false,
       force: false,
+      excludeSkills: [],
     });
 
     expect(result.warnings).toContainEqual(
@@ -1351,6 +1378,7 @@ describe("Claude migration", () => {
       install: false,
       includeLocal: false,
       force: false,
+      excludeSkills: [],
     });
     expect(
       await readFile(join(project.storeDir, "instructions", "root.md"), "utf8"),
@@ -1363,6 +1391,7 @@ describe("Claude migration", () => {
         install: false,
         includeLocal: false,
         force: false,
+        excludeSkills: [],
       }),
     ).rejects.toThrow(/does not resolve/u);
   });
@@ -1380,6 +1409,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
 
     expect(await pathExists(join(root, "CLAUDE.md"))).toBe(false);
@@ -1406,6 +1436,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
 
     await writeFile(fallback, "Edited fallback copy\n", "utf8");
@@ -1431,6 +1462,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
 
     await writeFile(fallback, "Edited Gemini fallback\n", "utf8");
@@ -1458,6 +1490,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     harness.skills = [];
@@ -1581,6 +1614,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const harness = await loadHarness(project.storeDir);
     const codex = parseToml(
@@ -1634,6 +1668,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     const codexConfig = await readFile(
       join(root, ".codex", "config.toml"),
@@ -1689,6 +1724,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     await applyHarness(project, await loadHarness(project.storeDir), {
       dryRun: false,
@@ -1796,6 +1832,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
 
     await writeFile(settingsPath, "{}\n", "utf8");
@@ -1835,6 +1872,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
 
     await writeFile(rulePath, "Use strict TypeScript.\n", "utf8");
@@ -1882,6 +1920,7 @@ describe("Claude migration", () => {
       install: false,
       includeLocal: false,
       force: false,
+      excludeSkills: [],
     });
     const reloaded = await loadHarness(project.storeDir);
     expect(JSON.stringify(reloaded.overlays.codex)).toContain(
@@ -1934,6 +1973,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
 
     await writeFile(
@@ -1968,6 +2008,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     await writeFile(
       join(root, ".claude", "settings.json"),
@@ -2001,6 +2042,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     await writeFile(
       join(root, ".claude", "settings.json"),
@@ -2033,6 +2075,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     await writeFile(
       join(root, ".claude", "settings.json"),
@@ -2053,6 +2096,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     await mkdir(join(root, ".claude", "skills", "private-local"), {
       recursive: true,
@@ -2084,6 +2128,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     await rm(join(root, ".claude", "settings.json"), { force: true });
 
@@ -2102,6 +2147,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     project.config.targets.antigravity.root = "subproject";
     const harness = await loadHarness(project.storeDir);
@@ -2127,6 +2173,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
 
     await writeFile(join(root, "AGENTS.md"), "Edited shared instructions\n", "utf8");
@@ -2158,6 +2205,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     await rm(join(root, ".claude", "skills", "demo", "SKILL.md"));
 
@@ -2188,6 +2236,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
     await writeFile(
       join(root, ".agents", "skills", "check", "SKILL.md"),
@@ -2227,6 +2276,7 @@ describe("Claude migration", () => {
       install: false,
       includeLocal: false,
       force: false,
+      excludeSkills: [],
     })).rejects.toThrow(/Duplicate imported agent name/u);
     expect(await pathExists(join(project.storeDir, "agents", "reviewer.md"))).toBe(false);
   });
@@ -2264,6 +2314,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
 
     const firstConfig = await readFile(join(root, ".codex", "config.toml"), "utf8");
@@ -2311,6 +2362,7 @@ describe("Claude migration", () => {
       install: true,
       includeLocal: false,
       force: true,
+      excludeSkills: [],
     });
 
     expect(await readFile(nativeAgent, "utf8")).toContain(literal);
@@ -2389,5 +2441,113 @@ describe("link mode switching", () => {
 
     expect(results.flatMap((result) => result.skipped)).toContain(join(root, "CLAUDE.md"));
     expect(await readFile(join(root, "CLAUDE.md"), "utf8")).toBe("hand written\n");
+  });
+});
+
+describe("skill import exclusion", () => {
+  async function nativeTreeWithTwoBadSkills(prefix: string) {
+    const root = await mkdtemp(join(tmpdir(), prefix));
+    roots.push(root);
+    const skills = join(root, ".claude", "skills");
+    await mkdir(skills, { recursive: true });
+    await writeFile(join(root, "CLAUDE.md"), "# Instructions\n", "utf8");
+
+    // importable
+    await mkdir(join(skills, "alpha-normal"), { recursive: true });
+    await writeFile(join(skills, "alpha-normal", "SKILL.md"), "---\nname: alpha-normal\n---\nbody\n");
+
+    // a skill that IS a symlink to a directory outside the project (the b200 shape)
+    const outside = join(root, "external", "linked-skill");
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "SKILL.md"), "---\nname: bravo-external\n---\nbody\n");
+    await symlink(outside, join(skills, "bravo-external"), "dir");
+
+    // a normal skill directory holding a nested symlink (the node_modules shape)
+    const nested = join(skills, "charlie-nested", "deps", "bin");
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(skills, "charlie-nested", "SKILL.md"), "---\nname: charlie-nested\n---\nbody\n");
+    await writeFile(join(skills, "charlie-nested", "deps", "real.js"), "1\n");
+    await symlink("../real.js", join(nested, "tool"));
+
+    return { root, skills };
+  }
+
+  const opts = (excludeSkills: string[]) => ({
+    apply: true,
+    install: false,
+    includeLocal: false,
+    force: true,
+    excludeSkills,
+  });
+
+  it("still fails without the flag, and fails again on the second blocker", async () => {
+    const { root } = await nativeTreeWithTwoBadSkills("harness-sync-exclude-control-");
+    const project = await initializeProject(root);
+
+    await expect(migrateFrom(project, "claude", opts([]))).rejects.toThrow(
+      /unmanaged symlinked directory/u,
+    );
+    // excluding only the first reveals the second — two independent gates
+    await expect(
+      migrateFrom(project, "claude", opts(["bravo-external"])),
+    ).rejects.toThrow(/nested symlink/u);
+  });
+
+  it("imports the rest once both are excluded, and says which were excluded", async () => {
+    const { root } = await nativeTreeWithTwoBadSkills("harness-sync-exclude-apply-");
+    const project = await initializeProject(root);
+
+    const result = await migrateFrom(
+      project,
+      "claude",
+      opts(["charlie-nested", "bravo-external"]),
+    );
+
+    expect(result.summary.skills).toBe(1);
+    expect(result.excluded).toEqual({ skills: ["bravo-external", "charlie-nested"] });
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "import-excluded" })]),
+    );
+    const harness = await loadHarness(project.storeDir);
+    expect(harness.skills.map((skill) => skill.name)).toEqual(["alpha-normal"]);
+    expect(await pathExists(join(project.storeDir, "skills", "bravo-external"))).toBe(false);
+    expect(await pathExists(join(project.storeDir, "skills", "charlie-nested"))).toBe(false);
+  });
+
+  it("leaves the excluded native paths exactly as they were", async () => {
+    const { root, skills } = await nativeTreeWithTwoBadSkills("harness-sync-exclude-native-");
+    const project = await initializeProject(root);
+    const before = await readlink(join(skills, "bravo-external"));
+
+    await migrateFrom(project, "claude", opts(["charlie-nested", "bravo-external"]));
+
+    expect((await lstat(join(skills, "bravo-external"))).isSymbolicLink()).toBe(true);
+    expect(await readlink(join(skills, "bravo-external"))).toBe(before);
+    expect((await lstat(join(skills, "charlie-nested", "deps", "bin", "tool"))).isSymbolicLink())
+      .toBe(true);
+  });
+
+  it("treats an unmatched name as a no-op rather than a silent success", async () => {
+    const { root } = await nativeTreeWithTwoBadSkills("harness-sync-exclude-typo-");
+    const project = await initializeProject(root);
+
+    await expect(
+      migrateFrom(project, "claude", opts(["bravo-externl"])),
+    ).rejects.toThrow(/unmanaged symlinked directory/u);
+  });
+
+  it("does not remove a canonical skill that a later run excludes", async () => {
+    const { root } = await nativeTreeWithTwoBadSkills("harness-sync-exclude-keep-");
+    const project = await initializeProject(root);
+    await migrateFrom(project, "claude", opts(["charlie-nested", "bravo-external"]));
+
+    await migrateFrom(
+      project,
+      "claude",
+      opts(["charlie-nested", "bravo-external", "alpha-normal"]),
+    );
+
+    const harness = await loadHarness(project.storeDir);
+    expect(harness.skills.map((skill) => skill.name)).toContain("alpha-normal");
   });
 });

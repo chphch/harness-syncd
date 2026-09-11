@@ -227,6 +227,13 @@ program
   .option("--install", "also install projections/links after --apply")
   .option("--force", "back up and replace occupied projection paths")
   .option("--include-local", "capture local-only settings as a non-projected overlay")
+  .addOption(
+    new Option(
+      "--exclude-skill <name>",
+      "drop a native skill directory from the import by name, before it is opened; repeatable",
+    ).argParser((value: string, previous: string[] = []) => [...previous, value])
+      .default([] as string[]),
+  )
   .action(
     async (
       sourceValue: string,
@@ -235,6 +242,7 @@ program
         install?: boolean;
         force?: boolean;
         includeLocal?: boolean;
+        excludeSkill?: string[];
       },
     ) => {
       const source = parseTarget(sourceValue);
@@ -251,6 +259,7 @@ program
           install: options.install === true,
           force: options.force === true,
           includeLocal: options.includeLocal === true,
+          excludeSkills: options.excludeSkill ?? [],
         });
         print(result);
         if (result.projections.some((projection) => projection.skipped.length > 0)) {

@@ -29,6 +29,18 @@ harness-sync migrate claude --apply --install --force
 
 `.claude/settings.local.json` is excluded unless `--include-local` is explicit. Even then it is marked local-only and is never projected by the adapter.
 
+
+`--exclude-skill <name>` drops one native skill directory from the import,
+matched by exact directory name and repeatable. The name is read from the
+directory entry, so the skill is never opened — which is what lets a migration
+proceed past a skill that is itself a symlink to another project, or one whose
+bundle contains a nested symlink such as a vendored `node_modules`. An excluded
+skill stays unmanaged in the native tree and is not projected; it is not
+deleted, and if a skill of that name is already in the canonical harness it
+stays there untouched. There is no way to import a bundle while pruning part of
+it — exclusion is whole-skill, because a per-entry filter would have to reach
+inside the bundle integrity check.
+
 ## User scope
 
 User migration reads authored files under `~/.claude` when the project controller uses `scope: user`. Within `~/.claude.json`, it inspects user `mcpServers` plus documented per-project `disabledMcpServers` membership for those captured servers. A disabled membership becomes only a fail-closed source-native requirement so another target cannot start the server without that gate. The file and the rest of its sign-in, OAuth, trust, UI, and project state are never copied or rewritten.
@@ -52,7 +64,7 @@ Occupied paths are skipped unless `--force` is supplied. A forced takeover moves
 
 Materialized configuration needs an additional safeguard because rewriting a whole native file could otherwise erase unrelated local policy. Before taking over an unmanaged Claude settings file, Codex config, or Antigravity MCP config, the adapter stores its parsed target-local base under `.harness-sync/.local/preserved/`. Canonical values win when the base is merged on future projections; the base remains machine-local and Git-ignored. An installed migration clears the source target's base after a complete baseline is established, because supported source fields have by then moved into the canonical model or source overlay.
 
-Imported skill bundles may contain only regular files and directories. Nested symlinks, symlinked child directories, FIFOs/devices/other special entries, and embedded `.git` metadata are rejected rather than skipped. Recursive rules/agents roots may not themselves be unmanaged directory symlinks, and every single-file input is type-checked before reading so a FIFO or device cannot block migration. A symlinked regular-file source is accepted only when it remains inside the selected harness boundary or is an existing managed projection resolving to the exact canonical destination; its target bytes are included in the migration snapshot. Some layouts, including Claude commands and Antigravity agents, reject source symlinks entirely. Known malformed JSON/JSONC/TOML/frontmatter fields fail the staged import. In particular, a Claude remote MCP entry with a URL but no explicit transport `type` is not repaired into an active server.
+Imported skill bundles may contain only regular files and directories. Nested symlinks, symlinked child directories, FIFOs/devices/other special entries, and embedded `.git` metadata are rejected rather than silently accepted. A skill named by `--exclude-skill` is dropped by directory name before the bundle is opened, so it is never stat'ed, walked, or copied and nothing inside it is inspected or followed; every bundle that IS imported passes the same checks as before. Recursive rules/agents roots may not themselves be unmanaged directory symlinks, and every single-file input is type-checked before reading so a FIFO or device cannot block migration. A symlinked regular-file source is accepted only when it remains inside the selected harness boundary or is an existing managed projection resolving to the exact canonical destination; its target bytes are included in the migration snapshot. Some layouts, including Claude commands and Antigravity agents, reject source symlinks entirely. Known malformed JSON/JSONC/TOML/frontmatter fields fail the staged import. In particular, a Claude remote MCP entry with a URL but no explicit transport `type` is not repaired into an active server.
 
 The daemon never interprets a missing managed link or copied artifact as a deletion; it creates a conflict. Removing shared configuration requires an explicit canonical edit. On apply, an unchanged managed projection is backed up and pruned; an externally changed stale projection is retained and reported. A file removed *inside* a linked skill was removed from the canonical bundle itself, so validation stops rather than creating a separate native-deletion conflict; restore it from Git/backup or remove that skill from `harness.yaml` intentionally.
 

@@ -159,6 +159,7 @@ export class ClaudeAdapter implements HarnessAdapter {
         options.managedPaths,
         nativeRoot,
         context.canonicalSourceStoreDir,
+        options.excludeSkills ?? [],
       );
       if (skills.length > 0) {
         const capturedNames = new Set(skills.map((skill) => skill.name));

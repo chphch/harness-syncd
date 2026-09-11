@@ -132,6 +132,7 @@ export class AntigravityAdapter implements HarnessAdapter {
         warnings,
         nativeRoot,
         context.canonicalSourceStoreDir,
+        options.excludeSkills ?? [],
       );
       if (skills.length > 0) {
         const capturedNames = new Set(skills.map((skill) => skill.name));
@@ -890,6 +891,7 @@ async function importAntigravitySkills(
   warningSink?: AdapterWarning[],
   nativeRoot = roots[0] ?? storeDir,
   canonicalSourceStoreDir?: string,
+  excludeSkills: readonly string[] = [],
 ): Promise<CanonicalHarness["skills"]> {
   const found = new Map<string, { name: string; path: string; source: string; standalone: boolean }>();
   for (const root of roots) {
@@ -900,6 +902,7 @@ async function importAntigravitySkills(
       managedPaths,
       nativeRoot,
       canonicalSourceStoreDir,
+      excludeSkills,
     )) {
       if (!found.has(skill.name)) {
         found.set(skill.name, {
@@ -920,6 +923,7 @@ async function importAntigravitySkills(
       }
       if (!capturePathAllowed(join(root, entry.name), managedPaths)) continue;
       const name = basename(entry.name, ".md");
+      if (excludeSkills.includes(name)) continue;
       assertArtifactName(name, "skill");
       if (!found.has(name)) {
         found.set(name, {

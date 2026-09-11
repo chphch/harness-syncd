@@ -35,6 +35,7 @@ export interface MigrationOptions {
   install: boolean;
   includeLocal: boolean;
   force: boolean;
+  excludeSkills: readonly string[];
 }
 
 export interface MigrationResult {
@@ -49,6 +50,7 @@ export interface MigrationResult {
     mcpServers: number;
     hookEvents: number;
   };
+  excluded?: { skills: string[] };
   warnings: AdapterWarning[];
   projections: ApplyResult[];
 }
@@ -92,6 +94,7 @@ export async function migrateFrom(
         includeLocal: options.includeLocal,
         includeAssets: true,
         write: true,
+        excludeSkills: options.excludeSkills,
       },
     );
     await writeHarness(stageDir, captured.harness);
@@ -169,6 +172,16 @@ export async function migrateFrom(
         }
       }
     }
+    if (options.excludeSkills.length > 0) {
+      captured.warnings.push({
+        code: "import-excluded",
+        message:
+          `Excluded from import by --exclude-skill: ${[...options.excludeSkills].sort().join(", ")}. ` +
+          "These native paths stay unmanaged and are not projected; an excluded name that is " +
+          "already in the canonical harness is left there untouched.",
+        fidelity: "target-only",
+      });
+    }
     return migrationReport(
       source,
       captured.harness,
@@ -176,6 +189,7 @@ export async function migrateFrom(
       captured.warnings,
       projections,
       options.apply,
+      options.excludeSkills,
     );
   } finally {
     await rm(stageDir, { recursive: true, force: true });
@@ -221,11 +235,14 @@ function migrationReport(
   warnings: AdapterWarning[],
   projections: ApplyResult[],
   applied: boolean,
+  excludeSkills: readonly string[] = [],
 ): MigrationResult {
+  const excluded = [...excludeSkills].sort();
   return {
     source,
     mode: applied ? "applied" : "plan",
     imported,
+    ...(excluded.length > 0 ? { excluded: { skills: excluded } } : {}),
     summary: {
       rules: harness.rules.length,
       skills: harness.skills.length,

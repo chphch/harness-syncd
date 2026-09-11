@@ -221,7 +221,7 @@ For exact paths, scope rules, reload behavior, and documentation discrepancies, 
 - Local Git commits likewise validate the exact staged tree before an expected-parent ref update.
 - Antigravity project permissions are not emitted because Google does not publish a stable repository-local schema.
 - Target-native MCP trust, authentication, approval, and required-startup features are restored only where the target and scope have the matching contract; projections without one are disabled where representable or omitted otherwise.
-- Canonical/import bundles must contain regular files and directories: nested symlinks, symlinked child directories, special files, and embedded `.git` metadata are rejected rather than followed, skipped, or silently converted to gitlinks. Unmanaged symlinked recursive-import roots are rejected as well.
+- Canonical/import bundles must contain regular files and directories: nested symlinks, symlinked child directories, special files, and embedded `.git` metadata are rejected rather than followed or silently converted to gitlinks. A skill named by `--exclude-skill` is never read at all, which narrows what is imported without relaxing any check on what is. Unmanaged symlinked recursive-import roots are rejected as well.
 - A regular-file source symlink is accepted only inside the selected harness boundary (or when it is an already-managed projection resolving to its exact canonical artifact), and its target bytes participate in migration preconditions. Individual importers may be stricter.
 
 Read [SECURITY.md](SECURITY.md) before enabling hooks or syncing a store between machines.

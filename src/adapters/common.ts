@@ -967,6 +967,7 @@ export async function importSkills(
   managedPaths?: readonly string[],
   nativeRoot = sourceDir,
   canonicalSourceStoreDir?: string,
+  excludeNames: readonly string[] = [],
 ): Promise<Array<{ name: string; path: string }>> {
   if (!(await pathExists(sourceDir))) return [];
   await assertNativeImportPath(sourceDir, nativeRoot);
@@ -976,6 +977,10 @@ export async function importSkills(
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
     const source = join(sourceDir, entry.name);
     if (!capturePathAllowed(source, managedPaths)) continue;
+    // Decided from the directory entry alone, before the first stat: an excluded
+    // skill is never opened, walked, or followed, so no import check is relaxed
+    // for it — or for anything else.
+    if (excludeNames.includes(entry.name)) continue;
     if (!(await pathExists(join(source, "SKILL.md")))) continue;
     assertArtifactName(entry.name, "skill");
     discovered.push({
