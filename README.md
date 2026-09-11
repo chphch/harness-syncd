@@ -94,6 +94,33 @@ Enrollment is deliberately two-factor: a valid controller file must exist and th
 
 Use `manage set <id> --watch false`, `manage set <id> --enabled false`, or `manage remove <id>` to change local enrollment without deleting project files or canonical stores. A missing/offline entry remains visible and removable. See [fleet management](docs/fleet.md) for the registry schema, recovery behavior, and service setup guidance.
 
+## Link mode
+
+Projections are symlinks by default: one canonical copy, and an edit through
+either path is the same write. Pass `copy` when the native tree is committed to
+Git — a symlink into a canonical store outside the repository resolves on the
+machine that made it and nowhere else.
+
+```bash
+harness-sync link-mode              # read the current mode
+harness-sync link-mode copy         # switch, reproject, and record the baseline
+harness-sync link-mode copy --dry-run
+harness-sync link-mode symlink --no-apply
+```
+
+Switching rewrites every projection for the controller, so it refuses while the
+store lock is held (the daemon holds it for its whole lifetime), while an
+unresolved conflict record exists, and when any managed projection has drifted
+from the ledger — `--force` overrides the last of these and backs the occupant
+up. Reprojection is idempotent: rerun the same command to finish a partial
+switch.
+
+Copy mode costs what the single canonical copy was buying. The bundle is
+duplicated under every enabled target root, the content shows up in the
+project's diffs instead of a one-line link, and a native edit reaches the store
+only when the watcher next reconciles — under `onConflict: stop` it is reported
+as a conflict rather than captured.
+
 ## Personal/private Git sync
 
 The source-code repository and your configuration repository are intentionally separate. For a private store, choose an external store when initializing the project:

@@ -4,7 +4,9 @@ import { join, resolve } from "node:path";
 import { Command, Option } from "commander";
 import {
   TARGET_NAMES,
+  type ApplyResult,
   type CanonicalHarness,
+  type LinkMode,
   type Scope,
   type TargetName,
 } from "./types.js";
@@ -42,7 +44,8 @@ import {
 import { establishBaseline, reconcileOnce } from "./core/reconcile.js";
 import { scanStoreForSecrets } from "./core/secret-scan.js";
 import { hashCanonical, readState } from "./core/state.js";
-import { acquireLock } from "./core/fs.js";
+import { acquireLock, pathExists } from "./core/fs.js";
+import { driftedManagedPaths } from "./core/writer.js";
 import { validateHarness } from "./core/validate.js";
 import {
   statusAllControllers,
@@ -268,29 +271,81 @@ program
     const project = await loadProject(cwd());
     const release = await acquireLock(join(project.storeDir, ".lock"));
     try {
-      const harness = await loadHarness(project.storeDir);
-      const expectedCanonicalHash = await hashCanonical(project, harness);
-      const results = await applyHarness(project, harness, {
+      const results = await runApply(project, {
         dryRun: options.dryRun === true,
         force: options.force === true,
       });
-      if (
-        !options.dryRun &&
-        results.every((result) => result.skipped.length === 0)
-      ) {
-        await establishBaseline(
-          project,
-          harness,
-          "canonical",
-          expectedCanonicalHash,
-        );
-      }
       print({ dryRun: options.dryRun === true, results });
       if (results.some((result) => result.skipped.length > 0)) process.exitCode = 2;
     } finally {
       await release();
     }
   });
+
+program
+  .command("link-mode")
+  .description("read or change how the harness is projected: symlink or copy")
+  .argument("[mode]", "symlink or copy; omit to read the current value")
+  .option("--dry-run", "show the reprojection without writing the config")
+  .option("--no-apply", "write the config but leave reprojection to the next apply")
+  .option("--force", "back up and replace occupied native paths")
+  .action(
+    async (
+      mode: string | undefined,
+      options: { dryRun?: boolean; apply?: boolean; force?: boolean },
+    ) => {
+      const project = await loadProject(cwd());
+      const previous = project.config.sync.linkMode;
+      if (mode === undefined) {
+        print({ linkMode: previous, config: project.configPath });
+        return;
+      }
+      const next = parseLinkMode(mode);
+      // The store lock doubles as the daemon gate: it is held for the daemon's
+      // whole lifetime, so acquiring it fails while the fleet is up.
+      const release = await acquireLock(join(project.storeDir, ".lock"));
+      try {
+        if (next === previous && options.force !== true) {
+          print({ linkMode: next, previous, changed: false });
+          return;
+        }
+        const conflict = join(project.storeDir, "conflicts", "current.json");
+        if (await pathExists(conflict)) {
+          throw new Error(
+            `unresolved conflict at ${conflict}; run \`harness-sync sync\` before changing link mode`,
+          );
+        }
+        if (options.force !== true) {
+          const drifted = await driftedManagedPaths(project.storeDir);
+          if (drifted.length > 0) {
+            throw new Error(
+              `managed projections changed outside harness-sync; reconcile or pass --force: ${drifted.join(", ")}`,
+            );
+          }
+        }
+        project.config.sync.linkMode = next;
+        if (options.dryRun !== true) {
+          await writeProjectConfig(project.configPath, project.config);
+        }
+        const results = options.apply === false
+          ? []
+          : await runApply(project, {
+            dryRun: options.dryRun === true,
+            force: options.force === true,
+          });
+        print({
+          linkMode: next,
+          previous,
+          changed: true,
+          dryRun: options.dryRun === true,
+          results,
+        });
+        if (results.some((result) => result.skipped.length > 0)) process.exitCode = 2;
+      } finally {
+        await release();
+      }
+    },
+  );
 
 program
   .command("sync")
@@ -697,6 +752,26 @@ function canonicalGitPaths(harness: CanonicalHarness): string[] {
     ...Object.values(harness.commands).map((command) => command.promptFile),
     ...Object.values(harness.agents).map((agent) => agent.instructionsFile),
   ])];
+}
+
+/** The apply pipeline shared by `apply` and `link-mode`. The caller owns the
+ * store lock — acquireLock is not re-entrant. */
+async function runApply(
+  project: LoadedProject,
+  options: { dryRun: boolean; force: boolean },
+): Promise<ApplyResult[]> {
+  const harness = await loadHarness(project.storeDir);
+  const expectedCanonicalHash = await hashCanonical(project, harness);
+  const results = await applyHarness(project, harness, options);
+  if (!options.dryRun && results.every((result) => result.skipped.length === 0)) {
+    await establishBaseline(project, harness, "canonical", expectedCanonicalHash);
+  }
+  return results;
+}
+
+function parseLinkMode(value: string): LinkMode {
+  if (value === "symlink" || value === "copy") return value;
+  throw new Error(`Unknown link mode ${value}; expected symlink, copy`);
 }
 
 function parseTarget(value: string): TargetName {

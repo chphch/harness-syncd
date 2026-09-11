@@ -113,3 +113,36 @@ async function runCli(arguments_: string[]): Promise<any> {
   );
   return JSON.parse(result.stdout);
 }
+
+describe("link-mode CLI", () => {
+  it("reads, switches, refuses an unknown value, and no-ops on the same mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-sync-linkmode-cli-"));
+    roots.push(root);
+    const project = join(root, "proj");
+    await mkdir(project);
+    await runCli(["-C", project, "init", "--id", "lmcli"]);
+    await runCli(["-C", project, "apply"]);
+
+    expect(await runCli(["-C", project, "link-mode"])).toMatchObject({
+      linkMode: "symlink",
+    });
+
+    const preview = await runCli(["-C", project, "link-mode", "copy", "--dry-run"]);
+    expect(preview).toMatchObject({ linkMode: "copy", dryRun: true, changed: true });
+    expect(
+      (await loadProjectConfig(join(project, PROJECT_CONFIG_NAME))).sync.linkMode,
+    ).toBe("symlink");
+
+    const switched = await runCli(["-C", project, "link-mode", "copy"]);
+    expect(switched).toMatchObject({ linkMode: "copy", previous: "symlink", changed: true });
+    expect(
+      (await loadProjectConfig(join(project, PROJECT_CONFIG_NAME))).sync.linkMode,
+    ).toBe("copy");
+
+    expect(await runCli(["-C", project, "link-mode", "copy"])).toMatchObject({
+      changed: false,
+    });
+
+    await expect(runCli(["-C", project, "link-mode", "sideways"])).rejects.toThrow();
+  });
+});

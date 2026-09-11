@@ -624,6 +624,24 @@ export async function managedPathsForTarget(
  * target is currently disabled. Fleet registration uses this stricter view so
  * a second controller cannot claim a stale managed destination.
  */
+/** Managed paths whose on-disk shape no longer matches the ledger. A link mode
+ * change rewrites every projection, so a hand-edited one would be backed up and
+ * replaced without the author seeing it; callers refuse the switch instead. */
+export async function driftedManagedPaths(storeDir: string): Promise<string[]> {
+  const registry = await readManagedRegistry(storeDir);
+  if (!registry) return [];
+  const drifted: string[] = [];
+  for (const [path, source] of Object.entries(registry.links ?? {})) {
+    if (!(await symlinkPointsTo(path, source))) drifted.push(path);
+  }
+  for (const [path, hash] of Object.entries(registry.files ?? {})) {
+    if (!(await pathExists(path)) || (await hashPath(path)) !== hash) {
+      drifted.push(path);
+    }
+  }
+  return drifted.sort();
+}
+
 export async function managedPathsForStore(storeDir: string): Promise<string[]> {
   const path = join(storeDir, ".managed.json");
   await assertSafeStorePath(storeDir, path);

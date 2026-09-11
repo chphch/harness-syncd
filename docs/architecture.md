@@ -138,7 +138,7 @@ This has four important properties:
 3. Native/private skills can coexist beside managed links.
 4. Temp-file-plus-rename editors replace files *inside* the linked directory rather than replacing the link itself.
 
-Claude and Codex explicitly document symlinked skill folders. Google uses the same per-skill link strategy in its official `agents-cli` Antigravity setup implementation. On systems where links are unavailable, `linkMode: copy` materializes files and the watcher reconciles them.
+Claude and Codex explicitly document symlinked skill folders. Google uses the same per-skill link strategy in its official `agents-cli` Antigravity setup implementation. Where links are unavailable, or where the native tree is committed to Git and a link pointing outside the repository would be useless to anyone else, `linkMode: copy` materializes files and the watcher reconciles them. `harness-sync link-mode <symlink|copy>` switches an existing controller in either direction: a projection the tool already owns is replaced in place, proven by the ledger, so no `--force` is needed.
 
 The links created by the writer point from a native leaf to its exact canonical artifact. In the opposite direction, unmanaged directory symlinks at recursive import roots and imports that resolve outside the selected harness root are rejected. Accepted regular-file source links are content-hashed within that boundary. Nested symlinks and embedded `.git` metadata are rejected inside imported or canonical bundles, so external content cannot escape hashing or become a Git submodule entry by accident.
 
@@ -270,7 +270,7 @@ Project scope is stable at `.agents/skills`. In user scope the adapter creates p
 - Native parse error: transaction stops; last valid other-target files remain.
 - Concurrent distinct materialized writers: conflict record, no overwrite; shared symlink aliases retain normal filesystem write semantics.
 - Git divergence: rebase if clean; abort and report if conflicting.
-- Missing symlink privilege: select copy mode.
+- Missing symlink privilege, or a native tree tracked in Git: `harness-sync link-mode copy`.
 - Unknown native field: retain it in a target overlay or classify unsupported.
 - Literal secret: redact during import and block Git sync if later detected.
 - Controller config changed while watching: stop and require a daemon restart so roots/policy are reloaded coherently.
