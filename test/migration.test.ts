@@ -2375,6 +2375,45 @@ describe("Claude migration", () => {
     expect(await readFile(join(project.storeDir, "harness.yaml"), "utf8"))
       .not.toContain(literal);
   });
+
+  it("captures a native settings edit while a projected skill symlink points at the live store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-sync-stage-symlink-"));
+    roots.push(root);
+    await mkdir(join(root, ".claude", "skills", "review"), { recursive: true });
+    await writeFile(join(root, "CLAUDE.md"), "# Instructions\n", "utf8");
+    await writeFile(
+      join(root, ".claude", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: Review changes\n---\nReview carefully.\n",
+      "utf8",
+    );
+    const settingsPath = join(root, ".claude", "settings.json");
+    await writeFile(
+      settingsPath,
+      `${JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2)}\n`,
+      "utf8",
+    );
+
+    const project = await initializeProject(root);
+    await migrateFrom(project, "claude", {
+      apply: true,
+      install: true,
+      includeLocal: false,
+      force: true,
+      excludeSkills: [],
+    });
+    expect((await lstat(join(root, ".claude", "skills", "review"))).isSymbolicLink())
+      .toBe(true);
+
+    const settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
+      permissions: { allow: string[] };
+    };
+    settings.permissions.allow.push("Bash(pwd:*)");
+    await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+
+    expect((await reconcileOnce(project)).action).toBe("captured-native");
+    expect((await loadHarness(project.storeDir)).permissions.commandAllow)
+      .toContain("Bash(pwd:*)");
+  });
 });
 
 describe("link mode switching", () => {

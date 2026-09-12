@@ -290,7 +290,14 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
     try {
       captured = await adapter.capture(
         harness,
-        { ...adapterContext(project, source), storeDir: stageDir },
+        {
+          ...adapterContext(project, source),
+          storeDir: stageDir,
+          // Capture writes into the stage, but a projected native symlink still
+          // points at the live store; without this the importers see it as an
+          // unmanaged symlinked directory and refuse the capture.
+          canonicalSourceStoreDir: project.storeDir,
+        },
         {
           includeLocal: false,
           includeAssets: true,
