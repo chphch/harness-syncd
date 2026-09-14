@@ -29,6 +29,7 @@ import {
   type ApplyOptions,
   type CaptureOptions,
   type HarnessAdapter,
+  type HookScriptLayout,
 } from "./adapter.js";
 import {
   agentHasOnlyForeignTargetCapabilities,
@@ -52,7 +53,9 @@ import {
   mcpServerOverlays,
   mergeMcpServerOverlays,
   readJsonObject,
+  importHookScripts,
   renderHooks,
+  scanHookScriptReferences,
   renderMcpServers,
   withoutKeys,
 } from "./common.js";
@@ -169,6 +172,37 @@ export class ClaudeAdapter implements HarnessAdapter {
         ];
         imported.push(paths.skills);
       }
+      const hookScriptLayout = this.hookScripts(context);
+      if (hookScriptLayout) {
+        const importedScripts = await importHookScripts(
+          hookScriptLayout,
+          context.storeDir,
+          options.write,
+          options.managedPaths,
+          nativeRoot,
+          context.canonicalSourceStoreDir,
+        );
+        warnings.push(...importedScripts.warnings);
+        // The `length > 0` guard does double duty. It is the non-destruction
+        // guard — the importer returns [] for a missing directory, so a plain
+        // assignment on a freshly cloned machine would write `hookScripts: []`,
+        // which the next apply turns into a prune of every projected script.
+        // It is also what keeps absent-stays-absent true for stores that never
+        // used the feature. The name-keyed filter is a separate guard, for a
+        // capture restricted to already-owned paths.
+        if (importedScripts.entries.length > 0) {
+          const capturedNames = new Set(
+            importedScripts.entries.map((entry) => entry.name),
+          );
+          harness.hookScripts = [
+            ...(harness.hookScripts ?? []).filter(
+              (entry) => !capturedNames.has(entry.name),
+            ),
+            ...importedScripts.entries,
+          ];
+          imported.push(hookScriptLayout.dir);
+        }
+      }
       const agents = await importAgents(
         paths.agents,
         context.storeDir,
@@ -229,6 +263,12 @@ export class ClaudeAdapter implements HarnessAdapter {
         }
       }
       if (isRecord(safe.hooks)) metadata.hooksRaw = safe.hooks;
+      // Read-only, and deliberately after redaction so it sees the text that
+      // will actually be stored. Nothing mutates safe.hooks.
+      const scanLayout = this.hookScripts(context);
+      if (scanLayout) {
+        warnings.push(...scanHookScriptReferences(safe.hooks, scanLayout));
+      }
       const disabledMcpjsonServers = asStringArray(
         safe.disabledMcpjsonServers,
       );
@@ -505,6 +545,18 @@ export class ClaudeAdapter implements HarnessAdapter {
         join(paths.skills, skill.name),
       );
     }
+    // Gated on the LAYOUT, not on claudePaths, so one decision governs both the
+    // bytes and any future handling of the commands. Per entry, never the
+    // parent directory — copyFileAtomic creates nested parents itself.
+    const hookScriptLayout = this.hookScripts(context);
+    if (hookScriptLayout) {
+      for (const entry of harness.hookScripts ?? []) {
+        await writer.materialize(
+          resolveInside(context.storeDir, entry.path),
+          join(hookScriptLayout.dir, entry.name),
+        );
+      }
+    }
     for (const [name, agent] of Object.entries(harness.agents)) {
       const destination = resolveInside(
         paths.agents,
@@ -772,7 +824,27 @@ export class ClaudeAdapter implements HarnessAdapter {
       paths.commands,
       paths.settings,
       paths.mcp,
+      // The daemon's share of this entry is latency only — the audit timer
+      // finds a native edit either way. The correctness consumers are
+      // migration's compare-and-swap snapshot, the controller footprint, and
+      // the topology check.
+      //
+      // INVARIANT: this directory must never itself become a projection
+      // destination. assertSafeProjectTopology resolves every non-instruction
+      // watched leaf, so a watched directory that is a symlink into the store
+      // makes every command throw. Per-FILE projection keeps it real.
+      paths.hookScripts,
     ];
+  }
+
+  hookScripts(context: AdapterContext): HookScriptLayout | null {
+    const paths = claudePaths(context);
+    return {
+      dir: paths.hookScripts,
+      commandPrefix: context.scope === "project"
+        ? "$CLAUDE_PROJECT_DIR/.claude/hooks"
+        : "$HOME/.claude/hooks",
+    };
   }
 }
 
@@ -805,6 +877,7 @@ function claudePaths(context: AdapterContext) {
       agents: join(base, "agents"),
       commands: join(base, "commands"),
       settings: join(base, "settings.json"),
+      hookScripts: join(base, "hooks"),
       localSettings: undefined,
       mcp: join(base, "..", ".claude.json"),
       alternateInstructions: undefined,
@@ -818,6 +891,7 @@ function claudePaths(context: AdapterContext) {
     agents: join(base, ".claude", "agents"),
     commands: join(base, ".claude", "commands"),
     settings: join(base, ".claude", "settings.json"),
+    hookScripts: join(base, ".claude", "hooks"),
     localSettings: join(base, ".claude", "settings.local.json"),
     mcp: join(base, ".mcp.json"),
     alternateInstructions: join(base, ".claude", "CLAUDE.md"),

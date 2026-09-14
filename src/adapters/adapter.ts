@@ -60,6 +60,25 @@ export interface NativeWritePreconditions {
   consumed: Set<string>;
 }
 
+/** Where a target keeps the executable files its hook commands run.
+ *
+ * No vendor documents such a directory today; `.claude/hooks/` is a convention
+ * from Claude's own doc examples. A target that has no convention returns
+ * `null`, which is a DECLARATION rather than an omission — the member is
+ * required precisely so a new adapter cannot compile without deciding.
+ */
+export interface HookScriptLayout {
+  /** Absolute native directory the scripts are projected into. */
+  dir: string;
+  /** The machine-independent text denoting `dir` inside a hook command, e.g.
+   * `$CLAUDE_PROJECT_DIR/.claude/hooks`. WARNING-ONLY: nothing may expand this
+   * or compare it against `dir` during a projection. Round-trip verification
+   * re-projects into a temporary root while `$HOME` still expands to the real
+   * home, so any such comparison fails there and turns an ordinary native edit
+   * into a hard conflict. A wrong value here costs a warning, never a byte. */
+  commandPrefix: string;
+}
+
 export interface HarnessAdapter {
   readonly name: TargetName;
   capture(
@@ -74,4 +93,13 @@ export interface HarnessAdapter {
   ): Promise<ApplyResult>;
   fingerprint(context: AdapterContext): Promise<string>;
   watchPaths(context: AdapterContext): string[];
+  /** `null` declares that this vendor documents no hook-script directory.
+   *
+   * Note on a future target: `adapters` in ./index.ts is a total
+   * `Record<TargetName, HarnessAdapter>`, so a fourth vendor fails to compile
+   * until it answers this. Enabling that vendor for existing controllers is a
+   * separate problem — config.ts spreads the NEW binary's target defaults over
+   * a stored config, so a newly shipped target arrives enabled and no CLI verb
+   * disables it. Resolve that with the target, not here. */
+  hookScripts(context: AdapterContext): HookScriptLayout | null;
 }

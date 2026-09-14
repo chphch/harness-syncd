@@ -30,6 +30,7 @@ import {
   type ApplyOptions,
   type CaptureOptions,
   type HarnessAdapter,
+  type HookScriptLayout,
 } from "./adapter.js";
 import {
   agentHasOnlyForeignTargetCapabilities,
@@ -729,6 +730,14 @@ export class CodexAdapter implements HarnessAdapter {
         fidelity: "unsupported" as const,
       });
     }
+    if ((harness.hookScripts?.length ?? 0) > 0) {
+      warnings.push({
+        code: "hook-scripts-not-projected",
+        message:
+          "Hook scripts were not projected to Codex: it documents no hook-script directory, so there is no location to write them to",
+        fidelity: "unsupported" as const,
+      });
+    }
     if (scrubbedConfig.removed > 0) {
       warnings.push({
         code: "secret-reference-not-projected",
@@ -786,6 +795,12 @@ export class CodexAdapter implements HarnessAdapter {
       paths.config,
       paths.hooks,
     ];
+  }
+
+  /** Codex documents hook CONFIG locations (.codex/config.toml, .codex/hooks.json)
+   * but no directory for the scripts those hooks run. */
+  hookScripts(_context: AdapterContext): HookScriptLayout | null {
+    return null;
   }
 }
 

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { GENERATED_DIRECTORY_NAMES } from "./hook-scripts.js";
 
 const MAX_CAPTURED_OUTPUT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_REMOTE = "origin";
@@ -655,11 +656,9 @@ async function resolveCommit(storeDir: string, reference: string): Promise<strin
 /** A canonical skill is staged as a whole directory with --force, so an
  * interpreter cache or vendored dependency tree that grew inside it would be
  * committed even though .gitignore names it. These are never canonical. */
-const GENERATED_PATH_EXCLUSIONS = [
-  ":(exclude)**/__pycache__/**",
-  ":(exclude)**/node_modules/**",
-  ":(exclude)**/.pytest_cache/**",
-];
+const GENERATED_PATH_EXCLUSIONS = GENERATED_DIRECTORY_NAMES.map(
+  (name) => `:(exclude)**/${name}/**`,
+);
 
 async function stageStoreChanges(
   storeDir: string,

@@ -1,6 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { homedir } from "node:os";
 import {
   parse as parseJsonc,
   printParseErrorCode,
@@ -19,6 +20,7 @@ import type {
 } from "../types.js";
 import {
   assertNativeImportPath,
+  copyFileAtomicInside,
   copyTreeForImportInside,
   listFilesRecursive,
   pathExists,
@@ -33,6 +35,12 @@ import {
   environmentReference,
 } from "../core/secrets.js";
 import { assertArtifactName } from "../core/validate.js";
+import {
+  GENERATED_DIRECTORY_NAMES,
+  assertHookScriptName,
+  type HookScriptEntry,
+} from "../core/hook-scripts.js";
+import type { HookScriptLayout } from "./adapter.js";
 
 const CLAUDE_RESERVED_MCP_SERVER_NAMES = new Set([
   "workspace",
@@ -1172,6 +1180,149 @@ export async function importCommands(
     });
   }
   return commands;
+}
+
+/**
+ * Sweep a target's hook-script directory into one canonical entry per real
+ * file. DECLARATION, NOT DERIVATION: the file set is never derived from the
+ * hook commands — a shared library named by no command (measured: one 18KB
+ * helper required by five sibling hooks) would be left behind, and every hook
+ * that requires it would fail on the second machine.
+ *
+ * Entries are per FILE, never a directory bundle. `fingerprintManagedTarget`
+ * hashes the BYTES of every owned path and recurses into owned directories, so
+ * owning the directory would make a generated cache or an in-tree log file a
+ * managed change; owning each file individually means a generated file is
+ * simply not a managed path.
+ */
+export async function importHookScripts(
+  layout: HookScriptLayout,
+  storeDir: string,
+  write: boolean,
+  managedPaths: readonly string[] | undefined,
+  nativeRoot: string,
+  canonicalSourceStoreDir?: string,
+): Promise<{ entries: HookScriptEntry[]; warnings: AdapterWarning[] }> {
+  const warnings: AdapterWarning[] = [];
+  if (!(await pathExists(layout.dir))) return { entries: [], warnings };
+  await assertNativeImportPath(layout.dir, nativeRoot);
+
+  const discovered: Array<{ name: string; path: string; source: string }> = [];
+  const walk = async (directory: string, prefix: string): Promise<void> => {
+    const children = await readdir(directory, { withFileTypes: true });
+    for (const child of children) {
+      const source = join(directory, child.name);
+      const name = prefix === "" ? child.name : `${prefix}/${child.name}`;
+      if ((GENERATED_DIRECTORY_NAMES as readonly string[]).includes(child.name)) {
+        warnings.push({
+          code: "hook-script-generated-path-excluded",
+          message:
+            `${child.name} holds machine-generated files that are rebuilt from source; it was not imported`,
+          path: source,
+          fidelity: "compatible",
+        });
+        continue;
+      }
+      if (child.name.startsWith(".")) {
+        warnings.push({
+          code: "hook-script-hidden-path-excluded",
+          message:
+            "Hidden paths inside a hook-script directory are runtime state, not authored content; it was not imported",
+          path: source,
+          fidelity: "compatible",
+        });
+        continue;
+      }
+      // Skip rather than throw: the directory is swept wholesale, so one stray
+      // entry must not block the rest. Skipping is also the safe direction —
+      // a per-file copy DEREFERENCES a symlink, so following one into, say, a
+      // private key would copy it into a Git-synchronized store.
+      if (child.isSymbolicLink() || (!child.isDirectory() && !child.isFile())) {
+        warnings.push({
+          code: "hook-script-non-regular-path-skipped",
+          message:
+            "Only regular files are imported as hook scripts; a symlink or special file was skipped",
+          path: source,
+          fidelity: "unsupported",
+        });
+        continue;
+      }
+      if (child.isDirectory()) {
+        await walk(source, name);
+        continue;
+      }
+      assertHookScriptName(name);
+      discovered.push({ name, path: `hook-scripts/${name}`, source });
+    }
+  };
+  await walk(layout.dir, "");
+  assertUniqueImportedNames(discovered, "hook script");
+
+  const entries: HookScriptEntry[] = [];
+  for (const entry of discovered) {
+    // `layout.dir` is load-bearing: with per-file entries the DIRECTORY is
+    // never itself a managed path, so an inverse capture restricted to owned
+    // paths could never adopt a newly authored hook script.
+    if (!capturePathAllowed(entry.source, managedPaths ? [...managedPaths, layout.dir] : undefined)) {
+      continue;
+    }
+    const destination = resolveInside(storeDir, entry.path);
+    if (write && relative(entry.source, destination) !== "") {
+      await assertNativeImportPath(
+        entry.source,
+        nativeRoot,
+        canonicalSourceStoreDir
+          ? [destination, resolveInside(canonicalSourceStoreDir, entry.path)]
+          : destination,
+      );
+      await copyFileAtomicInside(storeDir, entry.source, destination);
+    }
+    entries.push({ name: entry.name, path: entry.path });
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  return { entries, warnings };
+}
+
+/**
+ * Report hook commands that name a machine-specific path into the script
+ * directory. READ-ONLY — it rewrites nothing, so its failure mode is a missing
+ * warning rather than a corrupted command. Never resolves or realpaths: under
+ * symlink link mode a managed native path resolves into the store.
+ */
+export function scanHookScriptReferences(
+  value: unknown,
+  layout: HookScriptLayout,
+): AdapterWarning[] {
+  const warnings: AdapterWarning[] = [];
+  const home = homedir();
+  const tildeDir = layout.dir === home || layout.dir.startsWith(`${home}/`)
+    ? `~${layout.dir.slice(home.length)}`
+    : null;
+  const visit = (node: unknown, path: string): void => {
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => visit(item, `${path}[${index}]`));
+      return;
+    }
+    if (isRecord(node)) {
+      for (const [key, child] of Object.entries(node)) {
+        visit(child, path === "" ? key : `${path}.${key}`);
+      }
+      return;
+    }
+    if (typeof node !== "string" || !/\.command$/u.test(path)) return;
+    if (node.includes(layout.commandPrefix)) return;
+    if (node.includes(layout.dir) || (tildeDir !== null && node.includes(tildeDir))) {
+      warnings.push({
+        code: "hook-command-machine-specific-path",
+        message:
+          `A hook command names this machine's own path to the hook-script directory; write ${layout.commandPrefix}/<script> instead so it resolves on every machine`,
+        path,
+        fidelity: "compatible",
+      });
+    }
+  };
+  visit(value, "");
+  return warnings;
 }
 
 export function assertUniqueImportedNames(

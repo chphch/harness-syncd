@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TARGET_NAMES, type CanonicalHarness, type TargetName } from "../types.js";
 import { isRecord } from "./frontmatter.js";
 import { pathExists, resolveInside } from "./fs.js";
+import { assertHookScriptName } from "./hook-scripts.js";
 
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_MCP_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
@@ -268,6 +269,7 @@ export async function validateHarness(
   validatePermissions(harness.permissions);
   validateHooks(harness.hooks);
   validateOverlays(harness.overlays);
+  await validateHookScripts(storeDir, harness);
 }
 
 async function validateArtifact(
@@ -682,6 +684,39 @@ function validateHooks(value: unknown): void {
         }
       }
     }
+  }
+}
+
+async function validateHookScripts(
+  storeDir: string,
+  harness: CanonicalHarness,
+): Promise<void> {
+  // Short-circuit so a store that never used the feature pays nothing.
+  if (harness.hookScripts === undefined) return;
+  const names = new Set<string>();
+  const paths = new Set<string>();
+  for (const entry of harness.hookScripts) {
+    if (!entry || typeof entry.name !== "string" || typeof entry.path !== "string") {
+      throw new Error("Invalid hook script entry: expected string name and path");
+    }
+    assertHookScriptName(entry.name);
+    const foldedName = entry.name.toLowerCase();
+    if (names.has(foldedName)) {
+      throw new Error(`Duplicate hook script name (case-insensitive): ${entry.name}`);
+    }
+    names.add(foldedName);
+    const foldedPath = entry.path.toLowerCase();
+    if (paths.has(foldedPath)) {
+      throw new Error(`Duplicate hook script path (case-insensitive): ${entry.path}`);
+    }
+    paths.add(foldedPath);
+    await validateArtifact(
+      storeDir,
+      entry.path,
+      `hook script ${entry.name}`,
+      "hook-scripts",
+      "file",
+    );
   }
 }
 

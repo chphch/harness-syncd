@@ -244,6 +244,26 @@ export class ManagedWriter {
     if (this.options.linkMode === "symlink") {
       return this.link(source, destination);
     }
+    return this.copyFileEntry(source, destination);
+  }
+
+  /**
+   * Copy a regular file regardless of `linkMode`. Used for hook scripts, where
+   * copy-always is structural rather than a preference:
+   * - `link()` records `registry.links` and deletes `registry.files`, and
+   *   `changedManagedPathsForTarget` reads `registry.files` only — so a
+   *   symlinked projection can never be round-trip verified;
+   * - round-trip verification itself forces `linkMode: "copy"` in its shadow,
+   *   and `nativePathsEquivalent` requires both sides to be symlinks to compare
+   *   them as links;
+   * - a symlinked script directory would let the target's runtime write caches
+   *   and logs straight into the canonical store.
+   */
+  async materialize(source: string, destination: string): Promise<boolean> {
+    return this.copyFileEntry(source, destination);
+  }
+
+  private async copyFileEntry(source: string, destination: string): Promise<boolean> {
     // allowExistingTargetLink: in a symlink→copy switch the destination still
     // resolves to the source, which would otherwise read as the same path.
     await this.assertDistinctSourceAndDestination(source, destination, true);

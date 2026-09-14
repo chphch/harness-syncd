@@ -105,6 +105,7 @@ export interface TargetOverlay {
 }
 
 import type { SecretAllowlistEntry } from "./core/secret-allowlist.js";
+import type { HookScriptEntry } from "./core/hook-scripts.js";
 
 export interface CanonicalHarness {
   schemaVersion: 1;
@@ -133,6 +134,13 @@ export interface CanonicalHarness {
   /** Reviewed, committed approvals of individual scanned lines. Optional so an
    * existing store's harness.yaml keeps parsing and is not rewritten. */
   secretAllowlist?: SecretAllowlistEntry[];
+  /** Executable files a hook command runs, one entry per real file. `name` is
+   * the path relative to the target's script directory and may contain `/`.
+   * Optional for the same reason as `secretAllowlist`: writing `hookScripts: []`
+   * back would change the canonical bytes of every store that never used the
+   * feature — and an empty list is what makes `writer.finish` prune the
+   * projected scripts. */
+  hookScripts?: HookScriptEntry[];
   overlays: Record<TargetName, TargetOverlay>;
 }
 

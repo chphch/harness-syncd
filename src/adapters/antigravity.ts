@@ -31,6 +31,7 @@ import {
   type ApplyOptions,
   type CaptureOptions,
   type HarnessAdapter,
+  type HookScriptLayout,
 } from "./adapter.js";
 import {
   agentHasOnlyForeignTargetCapabilities,
@@ -670,6 +671,14 @@ export class AntigravityAdapter implements HarnessAdapter {
         fidelity: "unsupported",
       });
     }
+    if ((harness.hookScripts?.length ?? 0) > 0) {
+      adapterWarnings.push({
+        code: "hook-scripts-not-projected",
+        message:
+          "Hook scripts were not projected to Antigravity: it documents no hook-script directory, so there is no location to write them to",
+        fidelity: "unsupported" as const,
+      });
+    }
     const unsupportedEnabledToolFilters = Object.entries(
       harness.mcpServers,
     ).filter(([, server]) => server.enabledTools !== undefined);
@@ -747,6 +756,12 @@ export class AntigravityAdapter implements HarnessAdapter {
       paths.hooks,
       ...(paths.settings ? [paths.settings] : []),
     ];
+  }
+
+  /** Antigravity documents hook CONFIG at .agents/hooks.json but no directory for
+   * the scripts those hooks run. */
+  hookScripts(_context: AdapterContext): HookScriptLayout | null {
+    return null;
   }
 }
 

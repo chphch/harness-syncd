@@ -14,6 +14,7 @@ Verified against official documentation on **2026-09-10**. Native formats evolve
 | Settings | `.claude/settings.json` | `.codex/config.toml` | No stable repository-local general settings schema |
 | MCP | `.mcp.json` | `mcp_servers` in `.codex/config.toml` | `.agents/mcp_config.json` |
 | Hooks | `hooks` in `.claude/settings.json` | `.codex/config.toml` or `.codex/hooks.json` | `.agents/hooks.json` |
+| Hook scripts | `.claude/hooks/` *(convention, not vendor-documented)* | none documented | none documented |
 
 | Capability | Claude Code user | Codex user | Antigravity user |
 |---|---|---|---|
@@ -24,6 +25,7 @@ Verified against official documentation on **2026-09-10**. Native formats evolve
 | Settings | `~/.claude/settings.json` | `~/.codex/config.toml` | `~/.gemini/antigravity-cli/settings.json`; 2.0 config is mostly opaque |
 | MCP | `mcpServers` plus project disable membership in `~/.claude.json` | `mcp_servers` in config TOML | `~/.gemini/config/mcp_config.json` |
 | Hooks | user settings JSON | `$CODEX_HOME/config.toml` or `$CODEX_HOME/hooks.json` | `~/.gemini/config/hooks.json` |
+| Hook scripts | `~/.claude/hooks/` *(convention, not vendor-documented)* | none documented | none documented |
 
 ## Capability mapping
 
@@ -103,7 +105,27 @@ Event names overlap but execution contracts differ. v0.2 keeps imported hooks in
 harness-sync hook dispatch <hook-id> --target <target>
 ```
 
-Hooks fetched from Git must be treated as executable code. Remote integration is explicit, and materialized hook changes require a later `apply`/`sync`; already-linked skill scripts become visible as soon as a reviewed revision is accepted.
+Hooks fetched from Git must be treated as executable code. Remote integration is explicit. Hook *configuration* becomes effective only after a later `apply`/`sync`, while already-linked skill documents become visible as soon as a reviewed revision is accepted.
+
+#### Hook scripts
+
+The executable files a hook command runs are synchronized separately from hook configuration, as one canonical entry per real file. No vendor documents a directory for them: `.claude/hooks/` is a convention from Claude's own doc examples, and Codex and Antigravity document no equivalent, so their adapters declare that they have none and a store carrying hook scripts is projected only to Claude, with a `hook-scripts-not-projected` warning elsewhere.
+
+Hook scripts are always materialized as regular files, regardless of `linkMode`. Under `linkMode: symlink` every other copied artifact is a live view of the store; hook scripts are not, because they are executable code and because a symlinked script directory would let the target's runtime write logs and caches into the canonical store. This makes them the first content-copied artifact class whose on-disk shape is declared rather than inherited from `linkMode` — settings, MCP, commands and agents are rendered as text and have never had a `linkMode` branch at all.
+
+Three operational consequences follow under `linkMode: symlink`:
+
+- a store edit to a hook script takes effect only after the next `apply`/`sync`, unlike a symlinked skill;
+- a *native* edit to a hook script is captured and round-trip verified, which is the only way such an edit is verified at all;
+- a natively edited hook script counts as drift and blocks `harness-sync link-mode` until you reconcile or pass `--force`.
+
+What is imported: every regular file under the directory, including files no hook command names — a shared helper required by sibling hooks must travel or the hooks that need it fail on the second machine. What is skipped, each with a named warning: generated directories (`__pycache__`, `node_modules`, `.pytest_cache`), hidden paths, and symlinks or other non-regular entries. Empty directories do not travel, because Git carries none.
+
+Known boundary: a hook that reads a file *outside* its script directory is not covered. Nothing resolves a hook command's dependencies, so such a hook is projected intact and fails at run time on the second machine.
+
+Deleting a projected hook script natively is a hard stop, not a silent removal: reconcile reports `managed materialized path was deleted`. Remove the entry from `harness.yaml` first, then apply.
+
+Hook scripts are ordinary store content for the secret scanner, so a script containing a credential-shaped line blocks `harness-sync git sync` until that line is reviewed into `secretAllowlist`. Placeholder tokens in test fixtures and documentation strings routinely match; run `harness-sync doctor` after the first migration and review each finding rather than disabling the scan.
 
 ### Permissions
 

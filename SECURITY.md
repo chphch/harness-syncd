@@ -1,6 +1,6 @@
 # Security
 
-Harness configuration is executable configuration. Skills can instruct an agent to run commands, hooks execute commands directly, and MCP entries can launch local processes or send data to remote services.
+Harness configuration is executable configuration. Skills can instruct an agent to run commands, hooks execute commands directly, and MCP entries can launch local processes or send data to remote services. A store can also carry the hook scripts themselves — real executables, projected with their executable bit intact — so a synchronized store may contain code that runs without an agent ever deciding to run it.
 
 ## Defaults
 
@@ -37,7 +37,7 @@ Never point a canonical store at a complete `~/.claude`, `~/.codex`, or `~/.gemi
 
 ## Private Git stores
 
-Use a private remote and protect it like source code with execution privileges. Review `HEAD...<reviewCommit>`, then pass that exact full ID to `--accept-remote <reviewCommit>`, especially for hooks, MCP commands, skills with scripts, and agents with broad permissions. A branch tip that moves afterward is not implicitly trusted. Accepted changes to symlinked instructions/skills are immediately visible; translated settings change only after a later apply/sync. Prefer SSH agents or an OS credential helper; credential-bearing remote URLs are rejected.
+Use a private remote and protect it like source code with execution privileges. Review `HEAD...<reviewCommit>`, then pass that exact full ID to `--accept-remote <reviewCommit>`, especially for hook scripts, hooks, MCP commands, skills with scripts, and agents with broad permissions. A branch tip that moves afterward is not implicitly trusted. Accepted changes to symlinked instructions/skills are immediately visible; translated settings change only after a later apply/sync. Prefer SSH agents or an OS credential helper; credential-bearing remote URLs are rejected.
 
 The built-in scanner catches common patterns but cannot prove that a tree is secret-free. A line the scanner flags can be pre-approved by a reviewed `secretAllowlist` entry in `harness.yaml`, keyed on the path, the rule, and a hash of that line's bytes — edit the line and the approval lapses, so an approval cannot widen to cover a credential that arrives later. Whole-file findings (oversized, unreadable, non-regular, symlink, binary) carry no line to pin and cannot be pre-approved at all; their only escape remains the one-shot `--allow-secrets`, which now reports what it let through. It scans every regular file up to 2 MiB regardless of extension; an oversized, unreadable, non-regular, symlink, or NUL-containing (binary) entry is a blocking finding rather than silently skipped. It intentionally does not stage or scan the root `.local/`, `backups/`, `conflicts/`, `.state.json`, `.managed.json`, or `.lock` runtime paths, and it skips `.git` metadata and `__pycache__` directories at any depth. Git path checks separately refuse runtime/private paths even if ignore rules are wrong. Run an established secret scanner in the private repository's pre-commit/CI workflow as an additional layer.
 

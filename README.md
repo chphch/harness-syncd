@@ -4,7 +4,7 @@ Local-first, bidirectional harness synchronization for **Claude Code**, **Codex*
 
 `harness-syncd` keeps one Git-friendly canonical store, exposes byte-identical artifacts such as skills through per-skill symlinks, and materializes settings that require schema translation. Edits to already-managed native outputs are detected by a file watcher plus periodic hash audit and can flow back into the canonical store; unmanaged local additions are never silently enrolled.
 
-> **Status: v0.2 alpha.** Instructions, skills, rules, subagents, commands-as-skills, common MCP fields, target-native hook overlays, Claude migration, foreground watching, personal Git sync, and one machine-local supervisor for user plus project controllers work. Models, tool IDs, hooks, permissions, and undocumented settings stay target-specific unless a mapping is demonstrably safe.
+> **Status: v0.2 alpha.** Instructions, skills, rules, subagents, commands-as-skills, common MCP fields, target-native hook overlays, Claude hook-script synchronization, Claude migration, foreground watching, personal Git sync, and one machine-local supervisor for user plus project controllers work. Models, tool IDs, hooks, permissions, and undocumented settings stay target-specific unless a mapping is demonstrably safe.
 
 ## Why this exists
 
@@ -226,6 +226,7 @@ git:
 | Legacy commands | `.claude/commands/*.md` | Skill projection | Skill projection | Adapted |
 | MCP | `.mcp.json` + disable setting | `.codex/config.toml` | `.agents/mcp_config.json` | Common fields + fail-closed controls + raw overlay |
 | Hooks | Claude settings | Codex `config.toml` / `hooks.json` | `.agents/hooks.json` | Target-only in v0.2 |
+| Hook scripts | `.claude/hooks/**` | Not documented by the vendor | Not documented by the vendor | Synchronized per file and projected to Claude only; warned elsewhere |
 | Permissions | allow/ask/deny | sandbox + approval | Not projected in v0.2 | Same-target mapping; unsupported cross-target policy is warned and left target-local |
 | General settings | JSON overlay | TOML overlay | Opaque overlay | Target-only |
 

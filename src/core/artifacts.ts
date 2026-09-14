@@ -23,5 +23,10 @@ export function canonicalArtifactPaths(harness: CanonicalHarness): string[] {
     ...harness.skills.map((skill) => skill.path),
     ...Object.values(harness.commands).map((command) => command.promptFile),
     ...Object.values(harness.agents).map((agent) => agent.instructionsFile),
+    // Load-bearing: this list is also what `commitCaptureStage` moves back OUT
+    // of the capture stage. Omit it and a migration reports SUCCESS while
+    // leaving a harness.yaml that declares scripts the store does not contain,
+    // because `hashCanonicalContent` hashes this same list and compares equal.
+    ...(harness.hookScripts ?? []).map((entry) => entry.path),
   ])];
 }
