@@ -5,6 +5,7 @@ import type {
   ProjectionState,
   TargetName,
 } from "../types.js";
+import { canonicalArtifactPaths } from "./artifacts.js";
 import { isRecord } from "./frontmatter.js";
 import {
   assertSafeStorePath,
@@ -23,16 +24,12 @@ export async function hashCanonical(
   const paths = [
     project.configPath,
     join(project.storeDir, "harness.yaml"),
-    resolveInside(project.storeDir, harness.instructions.root),
-    ...harness.rules.map((rule) => resolveInside(project.storeDir, rule.path)),
-    ...harness.skills.map((skill) => resolveInside(project.storeDir, skill.path)),
-    ...Object.values(harness.commands).map((command) =>
-      resolveInside(project.storeDir, command.promptFile),
-    ),
-    ...Object.values(harness.agents).map((agent) =>
-      resolveInside(project.storeDir, agent.instructionsFile),
+    ...canonicalArtifactPaths(harness).map((relativePath) =>
+      resolveInside(project.storeDir, relativePath),
     ),
   ];
+  // Dedupe AFTER resolving: two relative spellings can name one file, and
+  // hashPaths would otherwise hash it twice.
   return hashPaths([...new Set(paths)]);
 }
 

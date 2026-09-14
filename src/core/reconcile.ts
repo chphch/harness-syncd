@@ -25,6 +25,7 @@ import type {
   TargetName,
 } from "../types.js";
 import { getAdapter } from "../adapters/index.js";
+import { canonicalArtifactPaths } from "./artifacts.js";
 import { loadHarness, writeHarness } from "./config.js";
 import {
   acquireLock,
@@ -693,16 +694,6 @@ async function hashCanonicalContent(
     digest.update(`${relativePath}\0${await hashPath(resolveInside(storeDir, relativePath))}\0`);
   }
   return digest.digest("hex");
-}
-
-function canonicalArtifactPaths(harness: CanonicalHarness): string[] {
-  return [...new Set([
-    harness.instructions.root,
-    ...harness.rules.map((rule) => rule.path),
-    ...harness.skills.map((skill) => skill.path),
-    ...Object.values(harness.commands).map((command) => command.promptFile),
-    ...Object.values(harness.agents).map((agent) => agent.instructionsFile),
-  ])];
 }
 
 async function nativeRoundTripMismatches(

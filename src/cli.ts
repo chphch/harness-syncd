@@ -16,6 +16,7 @@ import {
   loadHarness,
   writeProjectConfig,
 } from "./core/config.js";
+import { canonicalArtifactPaths } from "./core/artifacts.js";
 import { watchProject } from "./core/daemon.js";
 import {
   connectRemote,
@@ -784,11 +785,7 @@ function canonicalGitPaths(harness: CanonicalHarness): string[] {
   return [...new Set([
     ".gitignore",
     "harness.yaml",
-    harness.instructions.root,
-    ...harness.rules.map((rule) => rule.path),
-    ...harness.skills.map((skill) => skill.path),
-    ...Object.values(harness.commands).map((command) => command.promptFile),
-    ...Object.values(harness.agents).map((agent) => agent.instructionsFile),
+    ...canonicalArtifactPaths(harness),
   ])];
 }
 
