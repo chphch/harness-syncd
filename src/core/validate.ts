@@ -689,6 +689,9 @@ function validateOverlays(value: unknown): void {
   if (!isRecord(value)) throw new Error("Invalid overlays: expected an object");
   for (const target of TARGET_NAMES) {
     const overlay = value[target];
+    // Mirrors normalizeHarness: a missing overlay is defaulted on load, so
+    // rejecting it here would only move the fourth-target failure one file over.
+    if (overlay === undefined) continue;
     if (!isRecord(overlay)) throw new Error(`Invalid overlays.${target}: expected an object`);
     for (const key of ["settings", "mcp", "metadata"] as const) {
       if (overlay[key] !== undefined && !isRecord(overlay[key])) {

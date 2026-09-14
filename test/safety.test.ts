@@ -20,6 +20,7 @@ import {
   defaultHarness,
   loadHarness,
   loadProjectConfig,
+  writeHarness,
 } from "../src/core/config.js";
 import {
   copyTreeForImport,
@@ -1192,5 +1193,57 @@ describe("secret scan allowlist", () => {
     expect(() => assertSecretAllowlist([
       { ...base, path: "../escape.md", rule: "literal-secret-field" },
     ])).toThrow(/store-relative/u);
+  });
+});
+
+describe("foreign target overlays", () => {
+  it("carries an unknown target's overlay through a load/write cycle", async () => {
+    const root = await tempRoot();
+    const store = join(root, "store");
+    await mkdir(join(store, "instructions"), { recursive: true });
+    await writeFile(join(store, "instructions", "root.md"), "Instructions\n");
+    const harness = defaultHarness("foreign") as unknown as {
+      overlays: Record<string, unknown>;
+    };
+    harness.overlays.cursor = { metadata: { hooksRaw: { Stop: [] } } };
+    await writeHarness(store, harness as never);
+
+    const loaded = (await loadHarness(store)) as unknown as {
+      overlays: Record<string, unknown>;
+    };
+    expect(loaded.overlays.cursor).toEqual({ metadata: { hooksRaw: { Stop: [] } } });
+    for (const known of ["claude", "codex", "antigravity"]) {
+      expect(loaded.overlays[known]).toEqual({});
+    }
+  });
+
+  it("accepts a harness whose overlay for a known target is absent", async () => {
+    const root = await tempRoot();
+    const store = join(root, "store");
+    await mkdir(join(store, "instructions"), { recursive: true });
+    await writeFile(join(store, "instructions", "root.md"), "Instructions\n");
+    const harness = defaultHarness("sparse") as unknown as {
+      overlays: Record<string, unknown>;
+    };
+    delete harness.overlays.antigravity;
+
+    // Through validateHarness, not loadHarness: loadHarness defaults the key
+    // back in, so a load-only assertion passes on exactly the broken state.
+    await expect(validateHarness(store, harness as never)).resolves.toBeUndefined();
+  });
+
+  it("still rejects an overlay that is present but not an object", async () => {
+    const root = await tempRoot();
+    const store = join(root, "store");
+    await mkdir(join(store, "instructions"), { recursive: true });
+    await writeFile(join(store, "instructions", "root.md"), "Instructions\n");
+    const harness = defaultHarness("wrong-shape") as unknown as {
+      overlays: Record<string, unknown>;
+    };
+    harness.overlays.codex = "nope";
+
+    await expect(validateHarness(store, harness as never)).rejects.toThrow(
+      /Invalid overlays\.codex/u,
+    );
   });
 });

@@ -8,6 +8,7 @@ import type {
   ProjectConfig,
   Scope,
   TargetName,
+  TargetOverlay,
 } from "../types.js";
 import { TARGET_NAMES } from "../types.js";
 import { isRecord } from "./frontmatter.js";
@@ -286,7 +287,10 @@ function normalizeHarness(
     throw new Error("Invalid harness.instructions.root: expected a string");
   }
   for (const target of TARGET_NAMES) {
-    if (!isRecord(overlays[target])) {
+    // Type-check only. A store written by a binary that knows more targets must
+    // still load here, so a MISSING overlay is defaulted below rather than
+    // rejected; only a present-but-wrong-shape one is an error.
+    if (overlays[target] !== undefined && !isRecord(overlays[target])) {
       throw new Error(`Invalid harness.overlays.${target}: expected an object`);
     }
   }
@@ -327,13 +331,20 @@ function normalizeHarness(
     ...(value.secretAllowlist === undefined
       ? {}
       : { secretAllowlist: normalizeSecretAllowlist(value.secretAllowlist) }),
+    // The spread carries an overlay for a target this binary does not know
+    // through a load/write cycle instead of deleting it; the TARGET_NAMES
+    // rebuild keeps `Record<TargetName, TargetOverlay>` true at runtime, which
+    // validate.ts dereferences without optional chaining. Do not re-hardcode
+    // the three names here — that is what a fourth target would have to edit.
     overlays: {
-      claude: isRecord(overlays.claude) ? overlays.claude : {},
-      codex: isRecord(overlays.codex) ? overlays.codex : {},
-      antigravity: isRecord(overlays.antigravity)
-        ? overlays.antigravity
-        : {},
-    },
+      ...(overlays as Record<string, TargetOverlay>),
+      ...Object.fromEntries(
+        TARGET_NAMES.map((target) => [
+          target,
+          isRecord(overlays[target]) ? overlays[target] : {},
+        ]),
+      ),
+    } as Record<TargetName, TargetOverlay>,
   };
 }
 
