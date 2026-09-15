@@ -33,10 +33,18 @@ export interface CarryEntry {
   /** Required on `kind: "directory"`, forbidden on `kind: "file"`. Matched
    * against the basenames of IMMEDIATE file children of the destination. */
   include?: string[];
+  /** Applied AFTER include, for the file a pattern legitimately selects but
+   * that can never be carried. Without it such a file is refused on every run
+   * and `doctor` is red forever — which is how a red signal stops meaning
+   * anything. Measured on a real tree: one of 51 matching launchd plists is a
+   * symlink into a project repo that is already backed up there. */
+  exclude?: string[];
   reason?: string;
 }
 
-const ENTRY_KEYS = new Set(["name", "kind", "path", "destination", "include", "reason"]);
+const ENTRY_KEYS = new Set([
+  "name", "kind", "path", "destination", "include", "exclude", "reason",
+]);
 
 export function assertCarryName(name: string): void {
   assertArtifactName(name, "carry");
@@ -194,6 +202,18 @@ export function normalizeCarry(value: unknown): CarryEntry[] {
       throw new Error(`Invalid ${at}.include: a file entry names one file already`);
     }
 
+    let exclude: string[] | undefined;
+    if (entry.exclude !== undefined) {
+      if (kind === "file") {
+        throw new Error(`Invalid ${at}.exclude: a file entry names one file already`);
+      }
+      if (!Array.isArray(entry.exclude)) {
+        throw new Error(`Invalid ${at}.exclude: expected an array`);
+      }
+      for (const pattern of entry.exclude) assertCarryIncludePattern(pattern, at);
+      exclude = [...(entry.exclude as string[])];
+    }
+
     let reason: string | undefined;
     if (entry.reason !== undefined) {
       if (typeof entry.reason !== "string") {
@@ -211,6 +231,7 @@ export function normalizeCarry(value: unknown): CarryEntry[] {
       path,
       destination,
       ...(include === undefined ? {} : { include }),
+      ...(exclude === undefined ? {} : { exclude }),
       ...(reason === undefined ? {} : { reason }),
     };
   });

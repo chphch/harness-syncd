@@ -402,6 +402,10 @@ async function selectCandidates(
   return children
     .filter((child) => !child.isDirectory())
     .filter((child) => (entry.include ?? []).some((p) => carryIncludeMatches(p, child.name)))
+    // Applied after include: a file an include pattern legitimately selects but
+    // that can never be carried would otherwise be refused on every run, making
+    // `doctor` red forever.
+    .filter((child) => !(entry.exclude ?? []).some((p) => carryIncludeMatches(p, child.name)))
     .map((child) => make(child.name, join(destination, child.name)))
     .sort((left, right) => left.file.localeCompare(right.file));
 }

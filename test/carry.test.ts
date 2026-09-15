@@ -790,3 +790,42 @@ describe("carry reconcile integrity", () => {
     expect(result.warnings.map((item) => item.code)).toContain("carry-capture-disabled");
   });
 });
+
+describe("carry exclude", () => {
+  it("drops a file an include pattern legitimately selects but cannot carry", async () => {
+    // WHY THIS EXISTS, measured on a real tree: one of 51 matching launchd
+    // plists is a symlink into a project repo that already backs it up. Without
+    // exclude it is refused on every run and `doctor` is red forever — which is
+    // how a red signal stops meaning anything.
+    const { home, project, store } = await fixture();
+    const agents = join(home, "Library", "LaunchAgents");
+    await destination(home, "com.example.real.plist");
+    await destination(home, "com.example.elsewhere.plist");
+    await symlink(
+      join(agents, "com.example.real.plist"),
+      join(agents, "com.example.linked.plist"),
+    );
+
+    const report = await captureCarry(
+      project,
+      harnessWith({ ...DECLARATION, exclude: ["com.example.linked.plist"] }),
+      { homeDir: home },
+    );
+
+    expect(report.warnings).toEqual([]);
+    expect((await readdir(join(store, "carry", "launch-agents"))).sort())
+      .toEqual(["com.example.elsewhere.plist", "com.example.real.plist"]);
+    // CANARY: drop the exclude and the symlink comes back as a standing refusal.
+    const without = await captureCarry(project, harnessWith(DECLARATION), { homeDir: home });
+    expect(without.warnings.map((item) => item.code)).toEqual(["carry-file-refused"]);
+  });
+
+  it("applies exclude AFTER include, and refuses it on a file entry", () => {
+    expect(carryIncludeMatches("com.example.*.plist", "com.example.linked.plist")).toBe(true);
+    expect(() => normalizeCarry([entry({
+      kind: "file", destination: "~/.gitconfig", include: undefined, exclude: ["x"],
+    })])).toThrow(/names one file already/u);
+    expect(() => normalizeCarry([entry({ exclude: ["**"] })])).toThrow(/recursive wildcard/u);
+    expect(() => normalizeCarry([entry({ exclude: ["sub/x"] })])).toThrow(/directory boundary/u);
+  });
+});

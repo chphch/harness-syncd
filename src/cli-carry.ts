@@ -81,10 +81,16 @@ export function registerCarryCommands(
       "basename pattern to take from a directory; repeatable, required for a directory",
       (value: string, previous: string[] = []) => [...previous, value],
     )
+    .option(
+      "--exclude <glob>",
+      "basename pattern to drop after --include; repeatable",
+      (value: string, previous: string[] = []) => [...previous, value],
+    )
     .option("--apply", "write the declaration into harness.yaml")
     .action(async (path: string, options: {
       name?: string;
       include?: string[];
+      exclude?: string[];
       apply?: boolean;
     }) => {
       const project = await loadProject(cwd());
@@ -109,7 +115,13 @@ export function registerCarryCommands(
       if (kind === "file" && include.length > 0) {
         throw new Error("--include names files inside a directory; this path is a file");
       }
-      for (const pattern of include) assertCarryIncludePattern(pattern, "carry add");
+      const exclude = options.exclude ?? [];
+      if (kind === "file" && exclude.length > 0) {
+        throw new Error("--exclude drops files inside a directory; this path is a file");
+      }
+      for (const pattern of [...include, ...exclude]) {
+        assertCarryIncludePattern(pattern, "carry add");
+      }
 
       const name = options.name ?? suggestName(absolute);
       const entry = normalizeCarry([{
@@ -118,6 +130,7 @@ export function registerCarryCommands(
         path: `${CARRY_STORE_PREFIX}/${name}`,
         destination,
         ...(kind === "directory" ? { include } : {}),
+        ...(exclude.length > 0 ? { exclude } : {}),
       }])[0]!;
 
       // MANDATORY OUTPUT, both halves. The matched list is what gets carried;
@@ -178,6 +191,7 @@ export function registerCarryCommands(
         kind: entry.kind,
         destination: entry.destination,
         ...(entry.include === undefined ? {} : { include: entry.include }),
+        ...(entry.exclude === undefined ? {} : { exclude: entry.exclude }),
         present: await pathExists(resolveCarryDestination(homedir(), entry)),
         lastCaptureAt: ledger.entries[entry.name]?.lastCaptureAt ?? null,
         files: report.files.filter((file) => file.entry === entry.name),
@@ -336,6 +350,10 @@ async function previewSelection(
     }
     if (!(entry.include ?? []).some((pattern) => carryIncludeMatches(pattern, child.name))) {
       unmatched.push(child.name);
+      continue;
+    }
+    if ((entry.exclude ?? []).some((pattern) => carryIncludeMatches(pattern, child.name))) {
+      unmatched.push(`${child.name} (excluded)`);
       continue;
     }
     const info = await lstat(join(absolute, child.name));

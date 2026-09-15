@@ -326,7 +326,10 @@ function validateCarry(harness: CanonicalHarness): void {
       for (const pattern of entry.include) {
         assertCarryIncludePattern(pattern, `carry ${entry.name}`);
       }
-    } else if (entry.include !== undefined) {
+      for (const pattern of entry.exclude ?? []) {
+        assertCarryIncludePattern(pattern, `carry ${entry.name}`);
+      }
+    } else if (entry.include !== undefined || entry.exclude !== undefined) {
       throw new Error(`Carry entry ${entry.name} is a file and must not list include patterns`);
     }
   }

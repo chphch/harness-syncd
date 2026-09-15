@@ -204,7 +204,7 @@ harness-sync carry enable            # machine-local, off by default
 harness-sync carry list              # measured state of every declaration
 ```
 
-`carry add` is read-only until `--apply`, and prints both what it matched and what it did **not** — that second list is how you find out the directory also holds files somebody else owns. A directory entry must name include patterns; there is no "everything" default.
+`carry add` is read-only until `--apply`, and prints both what it matched and what it did **not** — that second list is how you find out the directory also holds files somebody else owns. A directory entry must name include patterns; there is no "everything" default. `exclude` runs after `include`, for the file a pattern legitimately selects but that can never be carried — a symlink into a repo that already backs it up, say. Without it that file is refused on every run and `doctor` stays red forever, which is how a red signal stops meaning anything.
 
 ```yaml
 carry:
@@ -213,6 +213,7 @@ carry:
     path: carry/launch-agents
     destination: ~/Library/LaunchAgents
     include: [ "com.example.*.plist" ]
+    exclude: [ "com.example.linked.plist" ]   # optional; see below
     reason: every schedule on this machine
 ```
 
