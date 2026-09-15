@@ -3,6 +3,7 @@ import {
   link as hardLink,
   lstat,
   mkdir,
+  readdir,
   readFile,
   readlink,
   rename,
@@ -19,6 +20,7 @@ import {
   assertSafeStorePath,
   ensureRelativeSymlink,
   hashPath,
+  hashTextFileContent,
   hashNativePath,
   hashPaths,
   isNodeError,
@@ -35,6 +37,38 @@ interface ManagedRegistry {
   links: Record<string, string>;
   kinds?: Record<string, "file" | "directory">;
   owners?: Record<string, TargetName | TargetName[]>;
+}
+
+/** `backup()` names each directory from `new Date().toISOString()` with the
+ * colons swapped out, so a lexical sort is chronological. */
+const BACKUP_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z$/;
+
+/**
+ * Drop all but the newest `keep` backup directories. Bounds a failure mode that
+ * has no other ceiling: a backup is written per replaced path per apply, so a
+ * daemon re-applying in a loop fills the disk at its own polling rate rather
+ * than at the rate the user changes anything. Migration `capture-*` directories
+ * are a different mechanism — one per takeover, not one per write — and are
+ * left alone.
+ */
+export async function pruneBackups(storeDir: string, keep: number): Promise<string[]> {
+  const dir = join(storeDir, "backups");
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return [];
+    throw error;
+  }
+  const stamped = entries.filter((name) => BACKUP_STAMP.test(name)).sort();
+  const removed: string[] = [];
+  for (const name of stamped.slice(0, Math.max(0, stamped.length - keep))) {
+    const path = join(dir, name);
+    await assertSafeStorePath(storeDir, path);
+    await rm(path, { recursive: true, force: true });
+    removed.push(path);
+  }
+  return removed;
 }
 
 export interface WriterOptions {
@@ -208,6 +242,9 @@ export class ManagedWriter {
 
   async text(path: string, value: string): Promise<boolean> {
     await this.assertSafeDestination(path);
+    if (await this.adoptAlreadyMatching(path, hashTextFileContent(value), "file")) {
+      return true;
+    }
     if (!(await this.canReplace(path))) return false;
     const observed = (await pathExists(path)) ? await hashPath(path) : null;
     await this.assertNativePrecondition(path, observed);
@@ -268,6 +305,9 @@ export class ManagedWriter {
     // resolves to the source, which would otherwise read as the same path.
     await this.assertDistinctSourceAndDestination(source, destination, true);
     await this.assertSafeDestination(destination);
+    if (await this.adoptAlreadyMatching(destination, await hashPath(source), "file")) {
+      return true;
+    }
     if (!(await this.canReplace(destination))) return false;
     const wasManagedLink = await this.clearManagedLink(source, destination);
     const observed = !wasManagedLink && (await pathExists(destination))
@@ -305,6 +345,9 @@ export class ManagedWriter {
     }
     await this.assertDistinctSourceAndDestination(source, destination, true);
     await this.assertSafeDestination(destination);
+    if (await this.adoptAlreadyMatching(destination, await hashPath(source), "directory")) {
+      return true;
+    }
     if (!(await this.canReplace(destination))) return false;
     const wasManagedLink = await this.clearManagedLink(source, destination);
     const observed = !wasManagedLink && (await pathExists(destination))
@@ -382,6 +425,38 @@ export class ManagedWriter {
     delete this.registry.kinds?.[destination];
     this.setOwner(destination);
     if (result === "linked") this.consumeNativePrecondition(destination);
+    await this.flush();
+    return true;
+  }
+
+  /**
+   * An owned destination already holding the bytes this projection would write
+   * is converged, and rewriting it is not free: the replacement moves the live
+   * path into `backups/` and stages its replacement inside the directory the
+   * daemon watches, so an apply that changes nothing still schedules the next
+   * one. Restricted to paths the ledger already owns at the intended hash —
+   * an unowned native file that merely happens to match must stay unowned and
+   * reach `canReplace`, which refuses it until an import or `--force` takes it
+   * over deliberately. `written` is the set `finish()` treats as accounted for,
+   * so an adopted path has to join it or the prune would remove it.
+   */
+  private async adoptAlreadyMatching(
+    destination: string,
+    intended: string,
+    kind: "file" | "directory",
+  ): Promise<boolean> {
+    if (this.registry.files[destination] !== intended) return false;
+    if (!(await pathExists(destination))) return false;
+    if ((await hashPath(destination)) !== intended) return false;
+    await this.assertNativePrecondition(destination, intended);
+    this.written.push(destination);
+    if (this.options.dryRun) return true;
+    this.registry.files[destination] = intended;
+    this.registry.kinds ??= {};
+    this.registry.kinds[destination] = kind;
+    delete this.registry.links[destination];
+    this.setOwner(destination);
+    this.consumeNativePrecondition(destination);
     await this.flush();
     return true;
   }

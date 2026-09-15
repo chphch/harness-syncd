@@ -663,6 +663,22 @@ async function walk(base: string, current: string, output: string[]): Promise<vo
   }
 }
 
+function fileHashPrefix(relativePath: string, executable: boolean): string {
+  return `file:${relativePath}:executable=${String(executable)}:`;
+}
+
+/**
+ * The digest `hashPath` yields for a non-executable regular file holding
+ * `value`. Lets a caller compare intent against what is already on disk without
+ * staging a copy first — staging inside a watched directory is itself a change.
+ */
+export function hashTextFileContent(value: string): string {
+  return createHash("sha256")
+    .update(fileHashPrefix("", false))
+    .update(Buffer.from(value, "utf8"))
+    .digest("hex");
+}
+
 async function appendPathHash(
   digest: ReturnType<typeof createHash>,
   path: string,
@@ -711,7 +727,7 @@ async function appendPathHash(
     return;
   }
   if (info.isFile()) {
-    digest.update(`file:${relativePath}:executable=${String((info.mode & 0o111) !== 0)}:`);
+    digest.update(fileHashPrefix(relativePath, (info.mode & 0o111) !== 0));
     await appendFileBytes(digest, path);
     return;
   }

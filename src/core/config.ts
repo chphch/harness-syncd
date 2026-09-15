@@ -43,6 +43,7 @@ export function defaultProjectConfig(scope: Scope = "project"): ProjectConfig {
       auditIntervalMs: 30_000,
       linkMode: "symlink",
       onConflict: "stop",
+      backupRetention: 200,
     },
     git: {
       enabled: false,
@@ -141,6 +142,13 @@ export async function loadProjectConfig(path: string): Promise<ProjectConfig> {
   const git = isRecord(parsed.git) ? parsed.git : {};
   assertOptionalFiniteNumber(sync, "debounceMs", path, "sync");
   assertOptionalFiniteNumber(sync, "auditIntervalMs", path, "sync");
+  assertOptionalFiniteNumber(sync, "backupRetention", path, "sync");
+  if (
+    sync.backupRetention !== undefined &&
+    (!Number.isInteger(sync.backupRetention) || (sync.backupRetention as number) < 1)
+  ) {
+    throw new Error(`${path}: sync.backupRetention must be an integer of at least 1`);
+  }
   if (
     sync.linkMode !== undefined &&
     sync.linkMode !== "symlink" &&
@@ -184,6 +192,10 @@ export async function loadProjectConfig(path: string): Promise<ProjectConfig> {
         sync.onConflict === "prefer-canonical"
           ? "prefer-canonical"
           : "stop",
+      backupRetention: numberOr(
+        sync.backupRetention,
+        defaults.sync.backupRetention,
+      ),
     },
     git: {
       enabled: git.enabled === true,

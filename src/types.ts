@@ -15,6 +15,11 @@ export interface SyncPolicy {
   auditIntervalMs: number;
   linkMode: LinkMode;
   onConflict: "stop" | "prefer-canonical";
+  /** How many timestamped `backups/` directories to keep. Every replaced path
+   * leaves one behind, so an apply that misbehaves writes them as fast as it
+   * runs; there is deliberately no value meaning "unbounded". Migration
+   * `capture-*` directories are not counted and never pruned. */
+  backupRetention: number;
 }
 
 export interface GitPolicy {

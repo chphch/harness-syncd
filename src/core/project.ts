@@ -10,6 +10,7 @@ import type {
 } from "../types.js";
 import { TARGET_NAMES } from "../types.js";
 import { getAdapter } from "../adapters/index.js";
+import { pruneBackups } from "./writer.js";
 import type {
   AdapterContext,
   NativeWritePreconditions,
@@ -249,6 +250,9 @@ export async function applyHarness(
           : {}),
       }),
     );
+  }
+  if (!options.dryRun) {
+    await pruneBackups(project.storeDir, project.config.sync.backupRetention);
   }
   return results;
 }
