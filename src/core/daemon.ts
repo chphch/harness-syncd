@@ -58,6 +58,12 @@ export async function watchProject(
       throw restartError(project.configPath, "changed before watch startup");
     }
 
+    // Carried destinations are deliberately NOT watched. ~/.local/bin is
+    // 267 MB and ~/Library/LaunchAgents is written by other vendors' updaters,
+    // so watching them would cost far more than it saves. Capture therefore
+    // runs on the audit tick (sync.auditIntervalMs, default 30s) and on any
+    // explicit sync — costing up to one audit interval of latency before a new
+    // plist is captured. Weigh that before adding them here.
     const paths = [
       project.configPath,
       project.storeDir,
@@ -78,6 +84,12 @@ export async function watchProject(
         join(project.storeDir, "backups"),
         join(project.storeDir, "conflicts"),
         join(project.storeDir, ".git"),
+        // The machine-local carry ledger. Narrowly scoped rather than ignoring
+        // all of .local/, which would change existing behaviour for
+        // .local/preserved/. It is rewritten only when a capture actually
+        // changed something, so this is convergence hygiene rather than
+        // correctness — it removes one spurious reconcile per capture.
+        join(project.storeDir, ".local", "carry"),
       ],
     });
 

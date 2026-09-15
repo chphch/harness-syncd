@@ -19,7 +19,9 @@ import {
   writeHarness,
 } from "../src/core/config.js";
 import { canonicalArtifactPaths } from "../src/core/artifacts.js";
-import { initializeProject, loadProject } from "../src/core/project.js";
+import { applyHarness, initializeProject, loadProject } from "../src/core/project.js";
+import { reconcileOnce } from "../src/core/reconcile.js";
+import { validateHarness } from "../src/core/validate.js";
 import { pathExists } from "../src/core/fs.js";
 import {
   captureCarry,
@@ -719,5 +721,72 @@ describe("carry enablement", () => {
 
     expect(report.warnings.map((item) => item.code)).toContain("carry-capture-failed");
     expect(report.warnings.map((item) => item.message).join(" ")).toMatch(/\/\.local\//u);
+  });
+});
+
+describe("carry reconcile integrity", () => {
+  /** reconcileOnce resolves `~` through os.homedir(), which has no parameter to
+   * pass a fixture home into — so these tests move $HOME for their duration.
+   * Without it a pipeline test would read the developer's real
+   * ~/Library/LaunchAgents and copy it into the fixture store. */
+  async function withHome<T>(home: string, body: () => Promise<T>): Promise<T> {
+    const previous = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      return await body();
+    } finally {
+      if (previous === undefined) delete process.env.HOME;
+      else process.env.HOME = previous;
+    }
+  }
+
+  it("a carried edit is not a canonical change, so a native edit still round-trips", async () => {
+    // THE REASON carry is absent from canonicalArtifactPaths. If a carried edit
+    // moved hashCanonical, canonicalChanged would be true in the same window as
+    // a native edit — and the native edit would be discarded into recordConflict
+    // under the default onConflict, or force-overwritten under prefer-canonical.
+    const { home, project, store } = await fixture();
+    await destination(home, "com.example.job.plist");
+    const harness = harnessWith(DECLARATION);
+    await writeHarness(store, harness);
+    const result = await withHome(home, async () => {
+      await reconcileOnce(project);
+      await destination(home, "com.example.job.plist", "<plist>edited by the user</plist>");
+      return reconcileOnce(project);
+    });
+
+    expect(result.action).toBe("noop");
+    expect(result.conflict).toBeUndefined();
+    // …and the edit was still captured, on the same tick.
+    expect(await readFile(join(store, "carry", "launch-agents", "com.example.job.plist"), "utf8"))
+      .toBe("<plist>edited by the user</plist>\n");
+  });
+
+  it("a missing carry store directory does not brick validate, apply or backup", async () => {
+    // CANARY for validateCarry's grammar-only rule. Call validateArtifact from
+    // it and all three of these break at once on any machine that lost the
+    // directory to a bad merge — with capture unable to heal it, since capture
+    // needs carry.enabled AND a live destination.
+    const { home, project, store } = await fixture();
+    const harness = harnessWith(DECLARATION);
+    await writeHarness(store, harness);
+    expect(await pathExists(join(store, "carry"))).toBe(false);
+
+    await expect(validateHarness(store, await loadHarness(store))).resolves.toBeUndefined();
+    await expect(applyHarness(project, await loadHarness(store), { dryRun: true, force: false }))
+      .resolves.toBeDefined();
+    await withHome(home, async () => {
+      await expect(reconcileOnce(project)).resolves.toBeDefined();
+    });
+  });
+
+  it("surfaces the disabled warning through reconcile rather than swallowing it", async () => {
+    const { home, project, store } = await fixture({ enabled: false });
+    await destination(home, "com.example.job.plist");
+    await writeHarness(store, harnessWith(DECLARATION));
+
+    const result = await withHome(home, () => reconcileOnce(project));
+
+    expect(result.warnings.map((item) => item.code)).toContain("carry-capture-disabled");
   });
 });

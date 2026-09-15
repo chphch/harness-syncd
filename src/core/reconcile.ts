@@ -27,6 +27,7 @@ import type {
 import { getAdapter } from "../adapters/index.js";
 import { canonicalArtifactPaths } from "./artifacts.js";
 import { loadHarness, writeHarness } from "./config.js";
+import { captureCarrySafely } from "./carry.js";
 import {
   acquireLock,
   assertSafeStorePath,
@@ -81,7 +82,16 @@ export async function reconcileOnce(
     ? null
     : await acquireLock(join(project.storeDir, ".lock"));
   try {
-    return await reconcileUnlocked(project);
+    // Deliberately OUTSIDE reconcileUnlocked. Capture runs here, under the
+    // store lock this function already holds, and NOT inside applyHarness —
+    // which is what keeps migrate.ts, whose two applyHarness calls never touch
+    // reconcileOnce, free of any carry write. That is a structural property,
+    // not a flag somebody has to remember to set.
+    const carry = await captureCarrySafely(project, await loadHarness(project.storeDir));
+    const result = await reconcileUnlocked(project);
+    return carry.warnings.length === 0
+      ? result
+      : { ...result, warnings: [...carry.warnings, ...result.warnings] };
   } finally {
     if (release) await release();
   }
