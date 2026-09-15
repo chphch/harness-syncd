@@ -17,6 +17,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { readJsoncObject } from "../src/adapters/common.js";
+import { isGeneratedWatchPath } from "../src/core/daemon.js";
 import {
   defaultHarness,
   loadHarness,
@@ -1454,5 +1455,33 @@ describe("generated directories inside an imported bundle", () => {
 
     await expect(copyTreeForImport(source, join(root, "store", "skills", "review")))
       .rejects.toThrow(/nested symlink/u);
+  });
+});
+
+describe("watcher ignores generated directories", () => {
+  it("matches a generated directory at any depth, under any root", () => {
+    // Measured on this box: one skill's node_modules is 705 directories, the
+    // skills tree is projected to five native roots plus the store, and the
+    // user controller therefore wanted 6,265 descriptors. launchd gives a job
+    // 256. It died with EMFILE on every start while the other fourteen
+    // controllers kept running — so the daemon looked alive and one store
+    // silently stopped syncing.
+    expect(isGeneratedWatchPath(join("a", "skills", "x", "node_modules", "y", "index.js")))
+      .toBe(true);
+    expect(isGeneratedWatchPath(join("a", "__pycache__", "m.pyc"))).toBe(true);
+    expect(isGeneratedWatchPath(join("a", ".pytest_cache"))).toBe(true);
+    expect(isGeneratedWatchPath(join("a", "skills", "reviewer", "SKILL.md"))).toBe(false);
+    // Not a substring match: a directory merely NAMED like one is still watched.
+    expect(isGeneratedWatchPath(join("a", "my_node_modules", "x"))).toBe(false);
+  });
+
+  it("CANARY: the glob spelling this replaced would match nothing", () => {
+    // chokidar 4 removed glob support from `ignored`, so the natural
+    // `**/node_modules/**` is compared as a literal path. Writing it that way
+    // ignores nothing and reads exactly like a working rule.
+    const globbed = "**/node_modules/**";
+    const real = join("skills", "gdrive", "node_modules", "http-errors", "index.js");
+    expect(real).not.toBe(globbed);
+    expect(real.startsWith(globbed)).toBe(false);
   });
 });

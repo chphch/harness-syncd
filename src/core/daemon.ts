@@ -1,7 +1,7 @@
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
 import { getAdapter } from "../adapters/index.js";
-import { acquireLock, readTextIfExists } from "./fs.js";
+import { acquireLock, isGeneratedDirectory, readTextIfExists } from "./fs.js";
 import { backupCanonicalStore } from "./backup.js";
 import {
   adapterContext,
@@ -18,6 +18,17 @@ export interface WatchOptions {
   lock?: boolean;
   /** Stable config bytes captured by a fleet preflight. */
   expectedConfigSnapshot?: string;
+}
+
+/**
+ * Whether any segment of a path names a generated directory. Exported so the
+ * property the daemon depends on can be asserted directly: chokidar 4 removed
+ * glob support from `ignored`, so a double-star glob naming node_modules there
+ * is matched as a LITERAL path and silently ignores nothing — a failure that
+ * looks exactly like having no rule at all.
+ */
+export function isGeneratedWatchPath(candidate: string): boolean {
+  return candidate.split(sep).some((segment) => isGeneratedDirectory(segment));
 }
 
 export async function watchProject(
@@ -90,6 +101,21 @@ export async function watchProject(
         // changed something, so this is convergence hygiene rather than
         // correctness — it removes one spurious reconcile per capture.
         join(project.storeDir, ".local", "carry"),
+        // Generated directories, at ANY depth under any watched root. The
+        // importer has skipped these since 7058a88; the WATCHER did not, and
+        // that asymmetry is expensive: chokidar opens a descriptor per
+        // directory and launchd gives a job 256 of them by default. Measured on
+        // this box — one skill's node_modules is 705 directories, the skills
+        // tree is projected to five native roots plus the store, and the whole
+        // user controller therefore wanted 6,265 descriptors. It died with
+        // EMFILE on every start while the other fourteen controllers kept
+        // running, so the daemon looked alive and one store silently stopped
+        // syncing.
+        //
+        // A FUNCTION, not a glob: chokidar 4 removed glob support from
+        // `ignored`, so `**/node_modules/**` is matched as a literal path and
+        // silently ignores nothing.
+        isGeneratedWatchPath,
       ],
     });
 
