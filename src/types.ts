@@ -19,6 +19,12 @@ export interface SyncPolicy {
 
 export interface GitPolicy {
   enabled: boolean;
+  /** How often the daemon commits (and, with autoPush, pushes) the store.
+   * 0 disables it — the daemon then never touches Git and the store is only
+   * backed up when a human runs `git sync`. The daemon is the only thing that
+   * CAN do this on a schedule: it holds the store lock for its whole lifetime,
+   * so an external timer calling `git sync` would be refused every time. */
+  backupIntervalMs: number;
   autoPush: boolean;
   branch: string;
   remote: string;

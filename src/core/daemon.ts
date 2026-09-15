@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
 import { getAdapter } from "../adapters/index.js";
 import { acquireLock, readTextIfExists } from "./fs.js";
+import { backupCanonicalStore } from "./backup.js";
 import {
   adapterContext,
   enabledTargets,
@@ -27,6 +28,7 @@ export async function watchProject(
   let watcher: FSWatcher | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let audit: ReturnType<typeof setInterval> | undefined;
+  let backup: ReturnType<typeof setInterval> | undefined;
   let activeRun: Promise<void> | null = null;
   let pending = false;
   let stopping = false;
@@ -143,12 +145,33 @@ export async function watchProject(
       () => void run(),
       Math.max(1_000, project.config.sync.auditIntervalMs),
     );
+    // The daemon holds the store lock for its whole lifetime, so a cron calling
+    // `harness-sync git sync` would be refused on every run. Backing up has to
+    // happen in here or not at all.
+    if (project.config.git.enabled && project.config.git.backupIntervalMs > 0) {
+      backup = setInterval(() => {
+        void (async () => {
+          if (stopping || activeRun) return;
+          try {
+            await backupCanonicalStore(project, {
+              push: project.config.git.autoPush,
+              message: `harness-sync backup ${new Date().toISOString().slice(0, 10)}`,
+            });
+          } catch (error) {
+            // A failed backup must not stop the watcher: projection is the
+            // daemon's job and it still works. Report and keep watching.
+            options.onError?.(normalizeError(error));
+          }
+        })();
+      }, Math.max(60_000, project.config.git.backupIntervalMs));
+    }
     await run();
     const fatal = await stop;
     if (fatal) throw fatal;
   } finally {
     stopping = true;
     if (audit) clearInterval(audit);
+    if (backup) clearInterval(backup);
     if (timer) clearTimeout(timer);
     options.signal?.removeEventListener("abort", onAbort);
     try {

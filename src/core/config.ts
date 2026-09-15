@@ -46,6 +46,7 @@ export function defaultProjectConfig(scope: Scope = "project"): ProjectConfig {
     git: {
       enabled: false,
       autoPush: false,
+      backupIntervalMs: 0,
       branch: "main",
       remote: "origin",
     },
@@ -152,6 +153,7 @@ export async function loadProjectConfig(path: string): Promise<ProjectConfig> {
   ) {
     throw new Error(`${path}: sync.onConflict must be stop or prefer-canonical`);
   }
+  assertOptionalFiniteNumber(git, "backupIntervalMs", path, "git");
   for (const key of ["enabled", "autoPush"] as const) {
     if (git[key] !== undefined && typeof git[key] !== "boolean") {
       throw new Error(`${path}: git.${key} must be a boolean`);
@@ -184,6 +186,7 @@ export async function loadProjectConfig(path: string): Promise<ProjectConfig> {
     git: {
       enabled: git.enabled === true,
       autoPush: git.autoPush === true,
+      backupIntervalMs: numberOr(git.backupIntervalMs, defaults.git.backupIntervalMs),
       branch: stringOr(git.branch, defaults.git.branch),
       remote: stringOr(git.remote, defaults.git.remote),
     },

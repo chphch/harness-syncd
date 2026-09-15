@@ -16,7 +16,7 @@ import {
   loadHarness,
   writeProjectConfig,
 } from "./core/config.js";
-import { canonicalArtifactPaths } from "./core/artifacts.js";
+import { assertSecretScan, canonicalGitPaths } from "./core/backup.js";
 import { watchProject } from "./core/daemon.js";
 import {
   connectRemote,
@@ -781,13 +781,7 @@ function shellArgument(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function canonicalGitPaths(harness: CanonicalHarness): string[] {
-  return [...new Set([
-    ".gitignore",
-    "harness.yaml",
-    ...canonicalArtifactPaths(harness),
-  ])];
-}
+
 
 /** The apply pipeline shared by `apply` and `link-mode`. The caller owns the
  * store lock — acquireLock is not re-entrant. */
@@ -825,24 +819,3 @@ function print(value: unknown): void {
   }
 }
 
-async function assertSecretScan(
-  storeDir: string,
-  allowSecrets: boolean,
-  allowlist: readonly SecretAllowlistEntry[] = [],
-): Promise<AllowlistPartition> {
-  const findings = await scanStoreForSecrets(storeDir);
-  const partition = partitionByAllowlist(findings, allowlist);
-  if (partition.blocking.length === 0 || allowSecrets) return partition;
-  throw new Error(
-    `Secret scan blocked Git sync: ${partition.blocking
-      .map((finding) =>
-        `${finding.path}:${finding.line} (${finding.rule}` +
-        `${finding.lineHash === undefined ? "" : `, lineHash ${finding.lineHash}`})`)
-      .join(", ")}. Replace literals with environment references, add a reviewed ` +
-      "harness.yaml secretAllowlist entry for that exact lineHash, or pass --allow-secrets " +
-      `explicitly. Approved by the allowlist this run: ${partition.allowed.length}.` +
-      (partition.stale.length > 0
-        ? ` Stale allowlist entries that match nothing: ${partition.stale.length}.`
-        : ""),
-  );
-}

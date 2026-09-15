@@ -11,6 +11,10 @@ import {
 } from "../src/core/git.js";
 import { hashScannedLine, scanStoreForSecrets } from "../src/core/secret-scan.js";
 import { partitionByAllowlist } from "../src/core/secret-allowlist.js";
+import { backupCanonicalStore } from "../src/core/backup.js";
+import { acquireLock } from "../src/core/fs.js";
+import { initializeProject } from "../src/core/project.js";
+import { loadHarness, writeHarness } from "../src/core/config.js";
 
 const GIT_AVAILABLE = spawnSync("git", ["--version"], {
   encoding: "utf8",
@@ -647,3 +651,52 @@ function git(cwd: string, args: string[]): string {
   }
   return result.stdout.trim();
 }
+
+describe("scheduled store backup", () => {
+  it("commits the store from inside the daemon, which holds the lock", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-sync-daemon-backup-"));
+    tempRoots.push(root);
+    await writeFile(join(root, "CLAUDE.md"), "# Instructions\n", "utf8");
+    const project = await initializeProject(root);
+    await initStoreGit(project.storeDir, "main");
+
+    // The reason this lives in the daemon at all: it holds the store lock for
+    // its whole lifetime, so anything external calling `git sync` is refused.
+    const release = await acquireLock(join(project.storeDir, ".lock"));
+    try {
+      await expect(
+        backupCanonicalStore(project, { push: false, message: "scheduled" }),
+      ).resolves.toBeTruthy();
+    } finally {
+      await release();
+    }
+
+    const log = spawnSync("git", ["-C", project.storeDir, "log", "--oneline"], {
+      encoding: "utf8",
+    });
+    expect(log.stdout).toContain("scheduled");
+  });
+
+  it("refuses a scheduled backup that would commit a secret", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-sync-daemon-secret-"));
+    tempRoots.push(root);
+    await writeFile(join(root, "CLAUDE.md"), "# Instructions\n", "utf8");
+    const project = await initializeProject(root);
+    await initStoreGit(project.storeDir, "main");
+    await mkdir(join(project.storeDir, "skills", "leaky"), { recursive: true });
+    await writeFile(
+      join(project.storeDir, "skills", "leaky", "SKILL.md"),
+      "---\nname: leaky\ndescription: x\n---\nexport TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+      "utf8",
+    );
+    const harness = await loadHarness(project.storeDir);
+    harness.skills = [{ name: "leaky", path: "skills/leaky" }];
+    await writeHarness(project.storeDir, harness);
+
+    // A scheduled backup must not be a way around a gate the interactive
+    // command enforces.
+    await expect(backupCanonicalStore(project, { push: false })).rejects.toThrow(
+      /Secret scan blocked/u,
+    );
+  });
+});
