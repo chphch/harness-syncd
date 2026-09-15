@@ -44,6 +44,12 @@ export interface GitSyncOptions {
   /** Exact, previously fetched full commit ID the caller reviewed. */
   acceptRemote?: string;
   requiredPaths?: readonly string[];
+  /** Store path prefixes whose files may be the only copy that exists, so a
+   * reviewed remote commit that DROPS one is refused instead of applied. Needed
+   * because this deletion is performed by Git, not by us: `read-tree -m -u`
+   * exits 0 and silently removes the file from the worktree. */
+  protectedPathPrefixes?: readonly string[];
+  allowProtectedRemoval?: boolean;
   /** Validate the exact candidate tree in an isolated temporary worktree
    * before it can change the live canonical store. */
   validateCandidate?: (candidateStoreDir: string) => Promise<void>;
@@ -297,6 +303,14 @@ export async function syncGitStore(
   let reviewCommit: string | undefined;
   let sensitiveValues: string[] = [];
   let validatedHead = committed ? await currentCommit(storeDir) : undefined;
+  const protection = {
+    ...(options.protectedPathPrefixes === undefined
+      ? {}
+      : { prefixes: options.protectedPathPrefixes }),
+    ...(options.allowProtectedRemoval === undefined
+      ? {}
+      : { allowRemoval: options.allowProtectedRemoval }),
+  };
 
   if (hasRemote) {
     const remoteUrl = await getRemoteUrl(storeDir, remote);
@@ -356,6 +370,7 @@ export async function syncGitStore(
             integrationRef,
             expectedHead,
             sensitiveValues,
+            protection,
           );
           validatedHead = integrationRef;
           fastForwarded = true;
@@ -377,6 +392,7 @@ export async function syncGitStore(
             integrationRef,
             expectedHead,
             sensitiveValues,
+            protection,
           );
           validatedHead = integrationRef;
           fastForwarded = true;
@@ -387,6 +403,7 @@ export async function syncGitStore(
             integrationRef,
             options.validateCandidate,
             sensitiveValues,
+            protection,
           );
           rebased = true;
         }
@@ -488,6 +505,7 @@ async function prepareAndActivateRebase(
   integrationRef: string,
   validateCandidate: GitSyncOptions["validateCandidate"],
   sensitiveValues: readonly string[],
+  protection: { prefixes?: readonly string[]; allowRemoval?: boolean } = {},
 ): Promise<string> {
   const expectedHead = await currentCommit(storeDir);
   if (!expectedHead) {
@@ -531,6 +549,7 @@ async function prepareAndActivateRebase(
         candidateHead,
         expectedHead,
         sensitiveValues,
+        protection,
       );
       return candidateHead;
     },
@@ -543,6 +562,10 @@ async function activateValidatedCandidate(
   candidate: string,
   expectedHead: string | undefined,
   sensitiveValues: readonly string[],
+  protection: {
+    prefixes?: readonly string[];
+    allowRemoval?: boolean;
+  } = {},
 ): Promise<void> {
   const observedHead = await currentCommit(storeDir);
   if (observedHead !== expectedHead) {
@@ -555,6 +578,30 @@ async function activateValidatedCandidate(
     throw new Error(
       "Git working tree changed while the reviewed candidate was validated; the candidate was not activated",
     );
+  }
+
+  // MEASURED: with a file committed locally and absent from the candidate,
+  // `read-tree -m -u <expectedHead> <candidate>` exits 0 and the file is simply
+  // gone from the worktree — no refusal, no prompt, and by then update-ref has
+  // already moved the branch. For a projected artifact that is recoverable, the
+  // store is not its only copy. For a carried file it may well be.
+  if (
+    !protection.allowRemoval &&
+    protection.prefixes !== undefined &&
+    protection.prefixes.length > 0 &&
+    expectedHead !== undefined
+  ) {
+    const dropped = await listGitPaths(storeDir, [
+      "diff", "--name-only", "-z", "--diff-filter=D", expectedHead, candidate,
+      "--", ...protection.prefixes,
+    ]);
+    if (dropped.length > 0) {
+      throw new Error(
+        "Reviewed commit removes carried store files that may be their only copy: " +
+          `${dropped.join(", ")}. Re-run with --allow-carry-removal once you have confirmed ` +
+          "they are recoverable.",
+      );
+    }
   }
 
   const ref = `refs/heads/${branch}`;

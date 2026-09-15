@@ -9,6 +9,16 @@ import type { CanonicalHarness } from "../types.js";
  * in two of the three yields artifacts that are edited but never projected, or
  * committed but never verified.
  *
+ * `carry` is deliberately NOT here either, and for a stronger reason than the
+ * list below — it is the one kind that must NOT be in all three. (i) A carried
+ * edit would move `hashCanonical`, making `canonicalChanged` true and
+ * suppressing the inverse capture, so a native edit made in the same window is
+ * discarded into a recorded conflict or force-overwritten. (ii) The capture
+ * stage fans this list into a copy whose `lstat` of the source is unguarded, so
+ * one absent carry file would throw inside both the inverse-capture path and
+ * `migrate`. (iii) The stage uses it as its in/out set, and carry has nothing to
+ * move through a stage — it projects to no target at all.
+ *
  * Deliberately NOT included, because each caller owns it:
  * - the controller config path, which has no store-relative spelling;
  * - the absolute mapping, since each caller applies its own `resolveInside`;

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -619,6 +619,101 @@ describe.skipIf(!GIT_AVAILABLE)("Git store sync", () => {
       connectRemote(store, "https://example.invalid/repo.git?access_token=secret"),
     ).rejects.toThrow(/query parameters/u);
     expect(git(store, ["remote"])).toBe("");
+  });
+});
+
+describe.skipIf(!GIT_AVAILABLE)("carried files in the Git store", () => {
+  /** A store with a remote and one committed carried plist. */
+  async function seed() {
+    const root = await makeTempRoot();
+    const remote = join(root, "personal-store.git");
+    const store = join(root, "store");
+    const peer = join(root, "peer");
+    await mkdir(remote);
+    git(remote, ["init", "--quiet", "--bare"]);
+    await initStoreGit(store, "main");
+    configureIdentity(store);
+    await writeFile(join(store, "harness.yaml"), "schemaVersion: 1\n", "utf8");
+    await mkdir(join(store, "carry", "launch-agents"), { recursive: true });
+    await writeFile(join(store, "carry", "launch-agents", "com.example.only.plist"), "<plist/>\n", "utf8");
+    await connectRemote(store, remote);
+    await syncGitStore(store, { branch: "main", commitMessage: "base", push: true });
+    return { root, remote, store, peer };
+  }
+
+  it("stages a carried file through the ordinary pass, with no requiredPaths entry", async () => {
+    // The whole reason carry is NOT in canonicalGitPaths: requiredPaths exists
+    // to defeat .gitignore, and carry/ is not ignored.
+    const { store } = await seed();
+    await writeFile(join(store, "carry", "launch-agents", "com.example.new.plist"), "<plist/>\n", "utf8");
+    await chmod(join(store, "carry", "launch-agents", "com.example.new.plist"), 0o755);
+
+    const result = await syncGitStore(store, { branch: "main", commitMessage: "carry" });
+
+    expect(result.committed).toBe(true);
+    const listed = git(store, ["ls-files", "-s", "--", "carry"]);
+    expect(listed).toContain("carry/launch-agents/com.example.new.plist");
+    // The executable bit survives, which is invisible in a content diff.
+    expect(listed).toMatch(/100755 \S+ 0\s+carry\/launch-agents\/com\.example\.new\.plist/u);
+  });
+
+  it("CANARY: force-staging an absent carry path aborts the whole chunk, harness.yaml included", async () => {
+    // This is the measurement that kept carry OUT of requiredPaths. `git add
+    // --force` exits 128 on a path that matches nothing and stages nothing at
+    // all — so backupCanonicalStore would throw on every run, and the daemon's
+    // backup timer discards that by design. Backups stop, silently.
+    const { store } = await seed();
+    await writeFile(join(store, "harness.yaml"), "schemaVersion: 1\n# edited\n", "utf8");
+    git(store, ["reset", "--quiet"]);
+
+    const result = spawnSync(
+      "git",
+      ["add", "--force", "--", "./harness.yaml", "./carry/does-not-exist"],
+      { cwd: store, encoding: "utf8", shell: false },
+    );
+
+    expect(result.status).toBe(128);
+    expect(git(store, ["diff", "--cached", "--name-only"])).toBe("");
+  });
+
+  it("refuses a reviewed commit that drops a carried file", async () => {
+    const { root, remote, store, peer } = await seed();
+    git(root, ["clone", "--quiet", "--branch", "main", remote, peer]);
+    configureIdentity(peer);
+    git(peer, ["rm", "--quiet", "--", "carry/launch-agents/com.example.only.plist"]);
+    git(peer, ["commit", "--quiet", "--message", "drop the carried plist"]);
+    git(peer, ["push", "--quiet", "origin", "main"]);
+    const review = await syncGitStore(store, { branch: "main" });
+
+    await expect(syncGitStore(store, {
+      branch: "main",
+      acceptRemote: review.reviewCommit!,
+      protectedPathPrefixes: ["carry"],
+    })).rejects.toThrow(/may be their only copy/u);
+
+    // CANARY: without the refusal, `read-tree -m -u` exits 0 and the file is
+    // simply gone from the worktree, after update-ref has moved the branch.
+    expect(await readFile(join(store, "carry", "launch-agents", "com.example.only.plist"), "utf8"))
+      .toBe("<plist/>\n");
+  });
+
+  it("proceeds once the removal is explicitly allowed", async () => {
+    const { root, remote, store, peer } = await seed();
+    git(root, ["clone", "--quiet", "--branch", "main", remote, peer]);
+    configureIdentity(peer);
+    git(peer, ["rm", "--quiet", "--", "carry/launch-agents/com.example.only.plist"]);
+    git(peer, ["commit", "--quiet", "--message", "drop the carried plist"]);
+    git(peer, ["push", "--quiet", "origin", "main"]);
+    const review = await syncGitStore(store, { branch: "main" });
+
+    await syncGitStore(store, {
+      branch: "main",
+      acceptRemote: review.reviewCommit!,
+      protectedPathPrefixes: ["carry"],
+      allowProtectedRemoval: true,
+    });
+
+    expect(git(store, ["ls-files", "--", "carry"])).toBe("");
   });
 });
 

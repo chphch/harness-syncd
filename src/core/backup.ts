@@ -2,13 +2,26 @@ import { loadHarness } from "./config.js";
 import { syncGitStore, type GitSyncResult } from "./git.js";
 import type { LoadedProject } from "./project.js";
 import { canonicalArtifactPaths } from "./artifacts.js";
+import { CARRY_STORE_PREFIX } from "./carry-entry.js";
 import { validateHarness } from "./validate.js";
 import { partitionByAllowlist, type AllowlistPartition, type SecretAllowlistEntry } from "./secret-allowlist.js";
 import { scanStoreForSecrets } from "./secret-scan.js";
 
 /** The force-staged set: everything `canonicalArtifactPaths` names, plus the
  * two store-runtime files that are not artifacts but must be committed. Kept
- * beside the sync so the CLI and the daemon cannot drift apart on it. */
+ * beside the sync so the CLI and the daemon cannot drift apart on it.
+ *
+ * `carry/` is DELIBERATELY ABSENT, and the next reader will want to add it.
+ * Two measurements say not to. `git add --force -- harness.yaml carry/nope`
+ * exits 128 on the absent path and stages NOTHING — harness.yaml included,
+ * since they share one chunk — so `backupCanonicalStore` would throw on every
+ * run and the daemon's timer discards that by design: backups stop, silently.
+ * An empty `carry/x` force-stages rc=0 and then trips the staged-set assertion
+ * instead. Both states are reachable, and under capture-only both are sticky.
+ * And the force-stage buys nothing: `requiredPaths` exists to defeat
+ * .gitignore, `carry/` is not in the store's required ignore lines, and the
+ * ordinary staging pass already lists and stages a new carried file with its
+ * exec bit intact. */
 export function canonicalGitPaths(
   harness: Awaited<ReturnType<typeof loadHarness>>,
 ): string[] {
@@ -43,6 +56,12 @@ export async function backupCanonicalStore(
     remote: project.config.git.remote,
     push: options.push,
     requiredPaths: canonicalGitPaths(harness),
+    // A carried file may be the only copy of itself, and a reviewed remote
+    // commit that drops one is applied by `read-tree -m -u` with no refusal.
+    // Refuse it here instead; `--allow-carry-removal` is the deliberate override.
+    ...(harness.carry === undefined || harness.carry.length === 0
+      ? {}
+      : { protectedPathPrefixes: [CARRY_STORE_PREFIX] }),
     validateCandidate,
     afterIntegrate: () => validateCandidate(project.storeDir),
     ...(options.message ? { commitMessage: options.message } : {}),
