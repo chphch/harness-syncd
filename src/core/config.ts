@@ -43,7 +43,7 @@ export function defaultProjectConfig(scope: Scope = "project"): ProjectConfig {
       auditIntervalMs: 30_000,
       linkMode: "symlink",
       onConflict: "stop",
-      backupRetention: 200,
+      backupRetention: 3,
     },
     git: {
       enabled: false,

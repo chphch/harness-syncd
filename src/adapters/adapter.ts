@@ -47,6 +47,10 @@ export interface ApplyOptions {
    * forced takeover. The shared consumed set permits intentional cross-target
    * ownership of one physical path. */
   nativePreconditions?: NativeWritePreconditions;
+  /** Directory name every path replaced by THIS apply is backed up under, so
+   * one run leaves one directory across all targets and retention can be
+   * counted in applies. Omitted, each writer names its own. */
+  backupStamp?: string;
 }
 
 export interface NativeWritePreconditions {

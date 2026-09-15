@@ -80,6 +80,8 @@ export interface WriterOptions {
   allowedRoot?: string;
   activeTargets?: readonly TargetName[];
   nativePreconditions?: NativeWritePreconditions;
+  /** Shared across the writers of one apply; see ApplyOptions.backupStamp. */
+  backupStamp?: string;
 }
 
 export class ManagedWriter {
@@ -95,9 +97,17 @@ export class ManagedWriter {
     links: {},
   };
   private readonly registryPath: string;
+  /** Fixed for this writer's lifetime so every path it replaces lands in one
+   * directory; `backups/<stamp>/<target>/<file>` was always shaped for that,
+   * but the name used to be built per call, which made one apply look like as
+   * many backups as it touched paths and left retention unable to mean
+   * "the last N applies". */
+  private readonly backupStamp: string;
 
   constructor(private readonly options: WriterOptions) {
     this.registryPath = join(options.storeDir, ".managed.json");
+    this.backupStamp =
+      options.backupStamp ?? new Date().toISOString().replaceAll(":", "-");
   }
 
   async load(): Promise<void> {
@@ -634,11 +644,10 @@ export class ManagedWriter {
     const linkType = originalLink
       ? ((await stat(path)).isDirectory() ? "dir" : "file")
       : undefined;
-    const stamp = new Date().toISOString().replaceAll(":", "-");
     const destination = join(
       this.options.storeDir,
       "backups",
-      stamp,
+      this.backupStamp,
       this.options.target,
       `${createHash("sha256").update(path).digest("hex").slice(0, 12)}-${randomUUID()}-${basename(path)}`,
     );

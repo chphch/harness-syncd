@@ -237,6 +237,7 @@ export async function applyHarness(
   const excluded = new Set(options.exclude ?? []);
   const activeTargets = enabledTargets(project);
   const results: ApplyResult[] = [];
+  const backupStamp = new Date().toISOString().replaceAll(":", "-");
   for (const target of activeTargets) {
     if (excluded.has(target)) continue;
     results.push(
@@ -245,6 +246,7 @@ export async function applyHarness(
         force: options.force,
         linkMode: project.config.sync.linkMode,
         activeTargets,
+        backupStamp,
         ...(options.nativePreconditions
           ? { nativePreconditions: options.nativePreconditions }
           : {}),

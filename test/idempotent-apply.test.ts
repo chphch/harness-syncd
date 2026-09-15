@@ -62,6 +62,43 @@ describe("repeated apply", () => {
   );
 });
 
+describe("backup grouping", () => {
+  // The directory name used to be built inside backup(), once per replaced
+  // path, so one apply looked like as many backups as it touched files and no
+  // retention count could mean "the last N applies".
+  it("puts every target's replaced paths under one directory per apply", async () => {
+    const root = await mkdtemp(join(tmpdir(), "backup-grouping-"));
+    roots.push(root);
+    await writeFile(join(root, "CLAUDE.md"), "# Instructions\n", "utf8");
+    const project = await initializeProject(root);
+    project.config.sync.linkMode = "copy";
+    project.config.sync.backupRetention = 50;
+    await migrateFrom(project, "claude", migrateOptions);
+    const harness = await loadHarness(project.storeDir);
+    await applyHarness(project, harness, { dryRun: false, force: false });
+
+    const dir = join(project.storeDir, "backups");
+    const stamped = async () =>
+      (await readdir(dir)).filter((name) => /^\d{4}-/.test(name));
+    const before = await stamped();
+
+    // Hand-edit the native side of two different targets, which is what
+    // backups exist for and what a per-call stamp used to split apart.
+    const edited = ["CLAUDE.md", "AGENTS.md"];
+    for (const rel of edited) {
+      expect(await pathExists(join(root, rel))).toBe(true);
+      await writeFile(join(root, rel), "# Edited by hand\n", "utf8");
+    }
+    await applyHarness(project, harness, { dryRun: false, force: true });
+
+    const fresh = (await stamped()).filter((name) => !before.includes(name));
+    expect(fresh).toHaveLength(1);
+    // Two writers, one directory: the assertion that fails on a per-call stamp.
+    const targets = await readdir(join(dir, fresh[0]!));
+    expect(targets.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe("backup retention", () => {
   it("keeps the newest N stamped directories and never prunes a capture", async () => {
     const root = await mkdtemp(join(tmpdir(), "backup-retention-"));
