@@ -185,10 +185,38 @@ The fetch-only result prints an immutable `reviewCommit` plus ready-to-run revie
 │   ├── SKILL.md
 │   └── scripts|references|...   # preserved as a bundle
 ├── agents/<name>.md
-└── commands/<name>.md
+├── commands/<name>.md
+└── carry/<name>/               # backup copies of files that are NOT harness config
 ```
 
 Runtime state, ownership hashes, machine-local preserved bases, backups, conflicts, and `.git/` metadata are excluded from store commits.
+
+### Carried files
+
+Some files are worth keeping beside the harness without being harness configuration — a launchd plist, a hand-written CLI, a plugin manifest. `carry` keeps a copy of them in the store so they travel with everything else and get the same review, scan and history.
+
+It is **capture only**. harness-syncd copies a carried file INTO the store and never writes one back out, on any machine. Restoring is a `cp` you run yourself. That is deliberate: a carried file is often the only copy of itself, and the machine receiving a clone is the one least able to judge which version should win.
+
+```bash
+harness-sync carry add ~/Library/LaunchAgents --include 'com.example.*.plist'   # preview
+harness-sync carry add ~/Library/LaunchAgents --include 'com.example.*.plist' --apply
+harness-sync carry enable            # machine-local, off by default
+harness-sync carry list              # measured state of every declaration
+```
+
+`carry add` is read-only until `--apply`, and prints both what it matched and what it did **not** — that second list is how you find out the directory also holds files somebody else owns. A directory entry must name include patterns; there is no "everything" default.
+
+```yaml
+carry:
+  - name: launch-agents
+    kind: directory
+    path: carry/launch-agents
+    destination: ~/Library/LaunchAgents
+    include: [ "com.example.*.plist" ]
+    reason: every schedule on this machine
+```
+
+The declaration travels in Git; whether this machine captures does not. `carry.enabled` lives in the machine-local `harness-sync.yaml`, so a fresh clone holds the copies and the declarations without becoming an authority on either. When two versions diverge, `carry list` reports a conflict and nothing is written until you run `carry capture --adopt-destination <name>`.
 
 When an imported MCP entry depends on a target-only contract—such as Claude project approval/permissions, Codex project trust or per-tool approval, or Antigravity project trust/native OAuth—`harness.yaml` records a `requiredNativeFeatures` marker. Each marker is backed by retained post-redaction overlay data or evidence that the source target's native gate applies. A projection with the matching target and scope restores or relies on that contract; projections without both disable the portable server where their schema supports it, or omit it otherwise, and always warn instead of silently dropping trust, authentication, approval, or startup semantics. Project trust and project-MCP approval markers are project-only; Claude's per-project runtime disable marker and Antigravity's global settings permissions are user-only. Codex non-managed hook trust is bound to an exact definition hash in machine-local UI state, so restoring the hook file alone never satisfies a blocking-hook contract: its dependent MCP server remains disabled even on Codex, with a warning. Generated fail-closed outputs are recognized and never promoted into a matching contract during inverse capture.
 
@@ -227,6 +255,7 @@ git:
 | MCP | `.mcp.json` + disable setting | `.codex/config.toml` | `.agents/mcp_config.json` | Common fields + fail-closed controls + raw overlay |
 | Hooks | Claude settings | Codex `config.toml` / `hooks.json` | `.agents/hooks.json` | Target-only in v0.2 |
 | Hook scripts | `.claude/hooks/**` | Not documented by the vendor | Not documented by the vendor | Synchronized per file and projected to Claude only; warned elsewhere |
+| Carried files | n/a — one `~/`-rooted destination per declaration, no target | n/a | n/a | Captured into the store and reviewed like any other file; never projected back |
 | Permissions | allow/ask/deny | sandbox + approval | Not projected in v0.2 | Same-target mapping; unsupported cross-target policy is warned and left target-local |
 | General settings | JSON overlay | TOML overlay | Opaque overlay | Target-only |
 

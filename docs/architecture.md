@@ -105,6 +105,27 @@ overlays:
     settings: {}
 ```
 
+### Carried files — the one kind outside the model above
+
+`carry` declares ordinary files that are NOT harness configuration: one `~/`-rooted destination per declaration, no adapter, no fidelity grade, and no projection. It is the only kind whose destination is not derived from a target root.
+
+```yaml
+carry:
+  - name: launch-agents
+    kind: directory
+    path: carry/launch-agents
+    destination: ~/Library/LaunchAgents
+    include: [ "com.example.*.plist" ]
+```
+
+Three consequences follow from "no target", and each is load-bearing:
+
+- **It is absent from `canonicalArtifactPaths`.** That list is the agreement between the canonical-change hash, the capture stage, and the force-staged Git set. A kind that projects nowhere must not move the canonical hash, or a carried edit would suppress the inverse capture and discard a native edit made in the same window.
+- **It is absent from the force-staged Git set.** `carry/` is not gitignored, so the ordinary staging pass already picks it up with its executable bit intact; force-staging it would instead abort the whole staging chunk whenever a declared directory is empty or absent.
+- **It does not participate in `.managed.json`.** Ownership there implies a projection that `finish()` may prune or back up, which for a capture-only writer means renaming a live destination into `backups/`. Carry keeps a machine-local ledger at `.local/carry/ledger.json` instead, recording only what the destination hashed to at this machine's last capture.
+
+Capture runs inside `reconcileOnce`, under the store lock it already holds, and deliberately not inside `applyHarness` — which is what keeps the migration path free of any carry write without depending on a flag. Every state it can reach is a write into the store or a report; there is no cell in which it writes or deletes outside it.
+
 Every mapped field has one of these conceptual fidelity grades:
 
 | Grade | Meaning | Write policy |

@@ -127,6 +127,18 @@ Deleting a projected hook script natively is a hard stop, not a silent removal: 
 
 Hook scripts are ordinary store content for the secret scanner, so a script containing a credential-shaped line blocks `harness-sync git sync` until that line is reviewed into `secretAllowlist`. Placeholder tokens in test fixtures and documentation strings routinely match; run `harness-sync doctor` after the first migration and review each finding rather than disabling the scan.
 
+#### Carried files
+
+`carry` is the one kind with no vendor mapping at all, because it is not harness configuration. A declaration names one destination anywhere under `$HOME` — `~/Library/LaunchAgents`, `~/.local/bin`, `~/.claude/plugins` — and the store keeps a copy of the files it selects there. No adapter is consulted, and nothing is projected to any target.
+
+The boundary against the adapters is derived rather than listed: a destination is refused if it overlaps a target root, any path an adapter watches, any hook-script directory an adapter declares, or any path already claimed in `.managed.json` — including for a target that is currently disabled. So `~/.claude/plugins` is carryable only for as long as no adapter claims it; the day one does, the same guard refuses it without anybody editing a list.
+
+What is captured: the immediate file children of the destination whose basename matches a declared include pattern. What is refused, each with a named warning: symlinks and other non-regular entries (a per-file copy would dereference them), denied basenames such as `.env` and `id_rsa`, anything over the 2 MiB scan limit, files containing NUL bytes, setuid/setgid/sticky files, and anything that would enter the store with an unapproved secret finding. A refusal keeps the previous store copy rather than replacing it.
+
+Carried files are ordinary store content for the secret scanner, and one rule exists for them specifically: a plist spreads one assignment over `<key>` and `<string>` on adjacent lines, which every single-line rule missed. It is a line rule, so a finding can be approved into `secretAllowlist` like any other.
+
+Direction is the boundary that matters most. Hook scripts round-trip: a native edit is captured and a store edit is projected back. Carried files do not — they are captured only, and this version has no code path that writes one to a destination on any machine. Restoring a carried file is a `cp` you run yourself.
+
 ### Permissions
 
 Permission translation is conservative and explicit:
