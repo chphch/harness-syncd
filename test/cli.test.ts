@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -102,6 +102,112 @@ describe("multi-controller CLI", () => {
     expect((await loadProjectConfig(configPath)).controllerId).toBe(
       "legacy-controller",
     );
+  });
+});
+
+describe("carry CLI", () => {
+  /** Every carry verb resolves `~` through os.homedir(), so the CLI runs with
+   * HOME pointed at the fixture — otherwise `carry add ~/Library/LaunchAgents`
+   * in a test would read the developer's real launchd agents. */
+  async function carryCli(home: string, arguments_: string[]): Promise<any> {
+    const result = await execFile(
+      process.execPath,
+      ["--import", "tsx", cliPath, "--json", ...arguments_],
+      { cwd: resolve("."), maxBuffer: 10 * 1024 * 1024, env: { ...process.env, HOME: home } },
+    );
+    return JSON.parse(result.stdout);
+  }
+
+  async function seed() {
+    const root = await mkdtemp(join(tmpdir(), "harness-sync-carry-cli-"));
+    roots.push(root);
+    const home = join(root, "home");
+    const project = join(home, "project");
+    const agents = join(home, "Library", "LaunchAgents");
+    await mkdir(agents, { recursive: true });
+    await mkdir(project, { recursive: true });
+    await writeFile(join(agents, "com.example.job.plist"), "<plist/>\n", "utf8");
+    await writeFile(join(agents, "com.other.vendor.plist"), "<plist/>\n", "utf8");
+    await carryCli(home, ["-C", project, "init", "--id", "carrycli"]);
+    return { home, project, agents };
+  }
+
+  it("previews without writing, and names what it did NOT match", async () => {
+    // The unmatched list is MANDATORY output: it is how the author learns the
+    // directory also holds files owned by somebody else, while they can still
+    // act on it.
+    const { home, project, agents } = await seed();
+
+    const preview = await carryCli(home, [
+      "-C", project, "carry", "add", agents,
+      "--name", "launch-agents", "--include", "com.example.*.plist",
+    ]);
+
+    expect(preview.applied).toBe(false);
+    expect(preview.declaration.destination).toBe("~/Library/LaunchAgents");
+    expect(preview.matched.map((file: { name: string }) => file.name))
+      .toEqual(["com.example.job.plist"]);
+    expect(preview.unmatched).toEqual(["com.other.vendor.plist"]);
+    expect(await carryCli(home, ["-C", project, "carry", "list"])).toMatchObject({ entries: [] });
+  });
+
+  it("refuses a directory with no include patterns", async () => {
+    const { home, project, agents } = await seed();
+
+    await expect(carryCli(home, ["-C", project, "carry", "add", agents, "--apply"]))
+      .rejects.toThrow(/--include is required/u);
+  });
+
+  it("says capture is off rather than staying silent about it", async () => {
+    const { home, project, agents } = await seed();
+    await carryCli(home, [
+      "-C", project, "carry", "add", agents, "--name", "launch-agents",
+      "--include", "com.example.*.plist", "--apply",
+    ]);
+
+    const listed = await carryCli(home, ["-C", project, "carry", "list"]);
+
+    expect(listed.enabled).toBe(false);
+    expect(listed.warnings.map((item: { code: string }) => item.code))
+      .toEqual(["carry-capture-disabled"]);
+  });
+
+  it("enables, captures, and leaves the destination alone", async () => {
+    const { home, project, agents } = await seed();
+    await carryCli(home, [
+      "-C", project, "carry", "add", agents, "--name", "launch-agents",
+      "--include", "com.example.*.plist", "--apply",
+    ]);
+    await carryCli(home, ["-C", project, "carry", "enable"]);
+
+    const captured = await carryCli(home, ["-C", project, "carry", "capture"]);
+
+    expect(captured.captured).toEqual(["carry/launch-agents/com.example.job.plist"]);
+    expect((await readdir(agents)).sort())
+      .toEqual(["com.example.job.plist", "com.other.vendor.plist"]);
+    expect(await carryCli(home, ["-C", project, "status"]))
+      .toMatchObject({ carry: { declared: 1, enabled: true } });
+  });
+
+  it("removes a declaration without deleting the copies it may be the last of", async () => {
+    const { home, project, agents } = await seed();
+    await carryCli(home, [
+      "-C", project, "carry", "add", agents, "--name", "launch-agents",
+      "--include", "com.example.*.plist", "--apply",
+    ]);
+    await carryCli(home, ["-C", project, "carry", "enable"]);
+    await carryCli(home, ["-C", project, "carry", "capture"]);
+
+    const removed = await carryCli(home, ["-C", project, "carry", "remove", "launch-agents"]);
+
+    expect(removed.storeCopyKept).toBeTypeOf("string");
+    expect(await readFile(
+      join(project, ".harness-sync", "carry", "launch-agents", "com.example.job.plist"),
+      "utf8",
+    )).toBe("<plist/>\n");
+    // The declaration is gone, and the key is erased rather than left as `[]`.
+    expect(await readFile(join(project, ".harness-sync", "harness.yaml"), "utf8"))
+      .not.toContain("carry:");
   });
 });
 

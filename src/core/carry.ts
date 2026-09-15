@@ -100,9 +100,24 @@ export interface CarryFileReport {
 
 export interface CarryReport {
   enabled: boolean;
+  /** True when nothing was written. `captured` then lists what WOULD be
+   * captured — the states are computed by the same code either way, so a
+   * preview cannot disagree with the run it previews. */
+  dryRun: boolean;
   captured: string[];
   files: CarryFileReport[];
   warnings: AdapterWarning[];
+}
+
+export interface CaptureCarryOptions {
+  homeDir?: string;
+  /** Compute every state and write nothing. What `carry list`, `status` and
+   * `doctor` use, so none of them owns a second copy of the truth table. */
+  dryRun?: boolean;
+  /** Resolve a conflict (cells 4 and 8d) or a store-ahead (8c) by taking the
+   * destination. Explicit and per-entry, because any automatic choice here
+   * silently discards one of two divergent versions. */
+  adopt?: { entry: string; file?: string };
 }
 
 function warn(code: string, message: string, path?: string): AdapterWarning {
@@ -403,9 +418,12 @@ async function selectCandidates(
 export async function captureCarry(
   project: LoadedProject,
   harness: CanonicalHarness,
-  options: { homeDir?: string } = {},
+  options: CaptureCarryOptions = {},
 ): Promise<CarryReport> {
-  const report: CarryReport = { enabled: false, captured: [], files: [], warnings: [] };
+  const dryRun = options.dryRun === true;
+  const report: CarryReport = {
+    enabled: false, dryRun, captured: [], files: [], warnings: [],
+  };
   const entries = harness.carry ?? [];
   if (entries.length === 0) return report;
 
@@ -495,10 +513,16 @@ export async function captureCarry(
       const storeHash = hasStore ? await hashPath(candidate.storePath) : undefined;
       const recordedHash = recorded[candidate.file];
 
+      const adopting = options.adopt !== undefined &&
+        options.adopt.entry === entry.name &&
+        (options.adopt.file === undefined || options.adopt.file === candidate.file);
+
       const capture = async (): Promise<void> => {
-        await copyFileAtomicInside(project.storeDir, candidate.absolute, candidate.storePath);
-        files[candidate.file] = destinationHash;
-        entryChanged = true;
+        if (!dryRun) {
+          await copyFileAtomicInside(project.storeDir, candidate.absolute, candidate.storePath);
+          files[candidate.file] = destinationHash;
+          entryChanged = true;
+        }
         report.captured.push(candidate.storeRelative);
         report.files.push({ entry: entry.name, file: candidate.file, state: "captured" });
       };
@@ -515,9 +539,13 @@ export async function captureCarry(
         // Cell 4 — two copies, no local record. Equal means just record it;
         // different means write nothing in either direction.
         if (storeHash === destinationHash) {
-          files[candidate.file] = destinationHash;
-          entryChanged = true;
+          if (!dryRun) {
+            files[candidate.file] = destinationHash;
+            entryChanged = true;
+          }
           report.files.push({ entry: entry.name, file: candidate.file, state: "unchanged" });
+        } else if (adopting) {
+          await capture();
         } else {
           report.files.push({
             entry: entry.name,
@@ -535,6 +563,8 @@ export async function captureCarry(
         report.files.push({ entry: entry.name, file: candidate.file, state: "unchanged" });
       } else if (destinationMoved && !storeMoved) {
         await capture(); // Cell 8b — the normal path.
+      } else if (adopting) {
+        await capture();
       } else if (!destinationMoved && storeMoved) {
         // Cell 8c — another machine's capture arrived. There is no restore
         // direction, and overwriting here would silently discard it.
@@ -589,13 +619,14 @@ async function listStoreCopies(storeDir: string, entry: CarryEntry): Promise<str
 export async function captureCarrySafely(
   project: LoadedProject,
   harness: CanonicalHarness,
-  options: { homeDir?: string } = {},
+  options: CaptureCarryOptions = {},
 ): Promise<CarryReport> {
   try {
     return await captureCarry(project, harness, options);
   } catch (error) {
     return {
       enabled: false,
+      dryRun: options.dryRun === true,
       captured: [],
       files: [],
       warnings: [warn(

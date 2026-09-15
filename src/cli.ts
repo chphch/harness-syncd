@@ -53,6 +53,8 @@ import { hashCanonical, readState } from "./core/state.js";
 import { acquireLock, pathExists } from "./core/fs.js";
 import { driftedManagedPaths } from "./core/writer.js";
 import { validateHarness } from "./core/validate.js";
+import { CARRY_STORE_PREFIX } from "./core/carry-entry.js";
+import { carrySummary, registerCarryCommands } from "./cli-carry.js";
 import {
   statusAllControllers,
   syncAllControllers,
@@ -455,8 +457,11 @@ program
       targets,
       state: await readState(project.storeDir),
       git: await getGitStatus(project.storeDir),
+      carry: await carrySummary(project),
     });
   });
+
+registerCarryCommands(program, { cwd, print });
 
 const git = program.command("git").description("manage the personal Git-backed canonical store");
 
@@ -517,12 +522,17 @@ git
   )
   .option("-m, --message <message>", "commit message")
   .option("--allow-secrets", "override the built-in secret scan")
+  .option(
+    "--allow-carry-removal",
+    "accept a reviewed commit that deletes carried files that may be their only copy",
+  )
   .action(
     async (options: {
       push?: boolean;
       message?: string;
       allowSecrets?: boolean;
       acceptRemote?: string;
+      allowCarryRemoval?: boolean;
     }) => {
       const project = await loadProject(cwd());
       const release = await acquireLock(join(project.storeDir, ".lock"));
@@ -560,6 +570,16 @@ git
           push: options.push === true || project.config.git.autoPush,
           ...(options.acceptRemote ? { acceptRemote: options.acceptRemote } : {}),
           requiredPaths: canonicalGitPaths(localHarness),
+          // carry is NOT in requiredPaths — see the comment on canonicalGitPaths.
+          // It is protected on the way IN instead: a reviewed commit that drops
+          // a carried file is refused, because Git applies that deletion
+          // silently and the store copy may be the only one.
+          ...(localHarness.carry === undefined || localHarness.carry.length === 0
+            ? {}
+            : {
+              protectedPathPrefixes: [CARRY_STORE_PREFIX],
+              ...(options.allowCarryRemoval === true ? { allowProtectedRemoval: true } : {}),
+            }),
           validateCandidate: validateGitCandidate,
           afterIntegrate: () => validateGitCandidate(project.storeDir),
           ...(options.message ? { commitMessage: options.message } : {}),
@@ -624,11 +644,17 @@ program
       }),
     );
     const nativeOk = nativeChecks.every((check) => check.ok);
+    const carry = await carrySummary(project);
+    // A legitimately disabled second machine reports `enabled: false` WITHOUT
+    // failing doctor — otherwise every second machine fails forever and the
+    // signal stops meaning anything. Only a refusal or an unresolved conflict
+    // is a failure.
+    const carryOk = !isCarryFailing(carry);
     // Findings stay reported in full — an approval changes the verdict, never
     // what the diagnostic shows. A stale entry is its own red flag.
     const partition = partitionByAllowlist(findings, harness.secretAllowlist ?? []);
     print({
-      ok: partition.blocking.length === 0 && partition.stale.length === 0 && nativeOk,
+      ok: partition.blocking.length === 0 && partition.stale.length === 0 && nativeOk && carryOk,
       node: process.version,
       config: project.configPath,
       store: project.storeDir,
@@ -639,11 +665,12 @@ program
         mcpServers: Object.keys(harness.mcpServers).length,
       },
       nativeChecks,
+      carry,
       secretFindings: findings,
       secretAllowlisted: partition.allowed.length,
       secretAllowlistStale: partition.stale,
     });
-    if (partition.blocking.length > 0 || partition.stale.length > 0 || !nativeOk) {
+    if (partition.blocking.length > 0 || partition.stale.length > 0 || !nativeOk || !carryOk) {
       process.exitCode = 2;
     }
   });
@@ -808,6 +835,19 @@ function parseTarget(value: string): TargetName {
     return value as TargetName;
   }
   throw new Error(`Unknown target ${value}; expected ${TARGET_NAMES.join(", ")}`);
+}
+
+function isCarryFailing(summary: unknown): boolean {
+  if (typeof summary !== "object" || summary === null) return false;
+  const record = summary as {
+    states?: Record<string, number>;
+    warnings?: Array<{ code?: string }>;
+  };
+  if ((record.states?.conflict ?? 0) > 0) return true;
+  return (record.warnings ?? []).some((warning) =>
+    warning.code === "carry-entry-refused" ||
+    warning.code === "carry-file-refused" ||
+    warning.code === "carry-capture-failed");
 }
 
 function print(value: unknown): void {
