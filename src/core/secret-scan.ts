@@ -1,3 +1,4 @@
+import { GENERATED_DIRECTORY_NAMES } from "./fs.js";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
@@ -29,9 +30,9 @@ const EXCLUDED_DIRECTORIES = new Set([
 ]);
 // Machine-generated at any depth, and derived from sources that are scanned
 // anyway. Unlike a NUL-byte heuristic this cannot hide an authored file.
-const EXCLUDED_DIRECTORIES_AT_ANY_DEPTH = new Set([
+const EXCLUDED_DIRECTORIES_AT_ANY_DEPTH = new Set<string>([
   ".git",
-  "__pycache__",
+  ...GENERATED_DIRECTORY_NAMES,
 ]);
 const EXCLUDED_FILES = new Set([
   ".lock",

@@ -3,7 +3,7 @@ import { assertSecretAllowlist } from "./secret-allowlist.js";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TARGET_NAMES, type CanonicalHarness, type TargetName } from "../types.js";
 import { isRecord } from "./frontmatter.js";
-import { pathExists, resolveInside } from "./fs.js";
+import { isGeneratedDirectory, pathExists, resolveInside } from "./fs.js";
 import { assertHookScriptName } from "./hook-scripts.js";
 import { assertOutputStyleName } from "./output-styles.js";
 import { assertNamedFileName } from "./named-files.js";
@@ -851,6 +851,11 @@ async function validateNestedSymlinks(
     if (entry.name.toLowerCase() === ".git") {
       throw new Error(`canonical artifact contains nested Git metadata: ${join(current, entry.name)}`);
     }
+    // Mirrors the import walk: a dependency tree is rebuilt from source, is
+    // gitignored in the store, and routinely holds the .bin symlinks this
+    // check refuses. Validating it would make an importable bundle
+    // permanently unvalidatable.
+    if (isGeneratedDirectory(entry.name)) continue;
     const candidate = join(current, entry.name);
     const info = await lstat(candidate);
     if (info.isSymbolicLink()) {

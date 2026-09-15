@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { GENERATED_DIRECTORY_NAMES } from "./hook-scripts.js";
+import { GENERATED_DIRECTORY_NAMES } from "./fs.js";
 
 const MAX_CAPTURED_OUTPUT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_REMOTE = "origin";

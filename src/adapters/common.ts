@@ -35,9 +35,7 @@ import {
   environmentReference,
 } from "../core/secrets.js";
 import { assertArtifactName } from "../core/validate.js";
-import {
-  GENERATED_DIRECTORY_NAMES,
-} from "../core/hook-scripts.js";
+import { GENERATED_DIRECTORY_NAMES } from "../core/fs.js";
 import type { HookScriptLayout } from "./adapter.js";
 import {
   assertNamedFileName,

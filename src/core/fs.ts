@@ -227,6 +227,19 @@ export async function writeJsonAtomicInside(
   );
 }
 
+/** Machine-generated directories that must never enter the canonical store.
+ * Their contents are rebuilt from source, so importing them makes every rebuild
+ * a canonical change, and committing them ships bytes nobody authored. */
+export const GENERATED_DIRECTORY_NAMES = [
+  "__pycache__",
+  "node_modules",
+  ".pytest_cache",
+] as const;
+
+export function isGeneratedDirectory(name: string): boolean {
+  return (GENERATED_DIRECTORY_NAMES as readonly string[]).includes(name);
+}
+
 export async function copyTree(source: string, destination: string): Promise<void> {
   await mkdir(dirname(destination), { recursive: true });
   await cp(source, destination, {
@@ -272,6 +285,9 @@ export async function copyTreeForImport(
       dereference: false,
       errorOnExist: true,
       force: false,
+      // The assertion above skips these; the copy must skip them too, or the
+      // store gains bytes nothing validates and Git never carries.
+      filter: (source) => !isGeneratedDirectory(basename(source)),
     });
     const hadDestination = await pathExists(destination);
     if (hadDestination) await rename(destination, displaced);
@@ -314,6 +330,12 @@ async function assertSafeImportTree(root: string, current: string): Promise<void
     if (entry.name.toLowerCase() === ".git") {
       throw new Error(`import bundle contains nested Git metadata: ${candidate}`);
     }
+    // Skipped, not inspected: a dependency tree is rebuilt from source, is
+    // already excluded from the Git force-add, and routinely contains the
+    // symlinks and non-regular entries this walk refuses. Refusing the whole
+    // bundle over bytes that were never going to be committed loses the
+    // authored files beside them.
+    if (isGeneratedDirectory(entry.name)) continue;
     const info = await lstat(candidate);
     if (info.isSymbolicLink()) {
       throw new Error(`import bundle contains a nested symlink: ${candidate}`);

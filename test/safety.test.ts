@@ -1311,3 +1311,36 @@ describe("stale lock reclamation", () => {
     await (won[0] as PromiseFulfilledResult<() => Promise<void>>).value();
   });
 });
+
+describe("generated directories inside an imported bundle", () => {
+  it("imports a skill whose node_modules holds symlinks, without carrying them", async () => {
+    const root = await tempRoot();
+    const source = join(root, "review");
+    await mkdir(join(source, "gdrive", "node_modules", ".bin"), { recursive: true });
+    await writeFile(join(source, "SKILL.md"), "---\nname: review\n---\nReview.\n", "utf8");
+    await writeFile(join(source, "gdrive", "main.mjs"), "export default 1;\n", "utf8");
+    await writeFile(join(source, "gdrive", "node_modules", "dep.js"), "module.exports=1;\n", "utf8");
+    // The shape that made the whole bundle unimportable: a dependency tree's
+    // .bin entries are symlinks, and the import walk refused on the first one.
+    await symlink("../dep.js", join(source, "gdrive", "node_modules", ".bin", "dep"));
+
+    const destination = join(root, "store", "skills", "review");
+    await expect(copyTreeForImport(source, destination)).resolves.toBe("copied");
+
+    expect(await pathExists(join(destination, "SKILL.md"))).toBe(true);
+    expect(await pathExists(join(destination, "gdrive", "main.mjs"))).toBe(true);
+    expect(await pathExists(join(destination, "gdrive", "node_modules"))).toBe(false);
+  });
+
+  it("still refuses a symlink that is not inside a generated directory", async () => {
+    const root = await tempRoot();
+    const source = join(root, "review");
+    await mkdir(join(source, "lib"), { recursive: true });
+    await writeFile(join(source, "SKILL.md"), "---\nname: review\n---\nReview.\n", "utf8");
+    await writeFile(join(root, "outside.txt"), "private\n", "utf8");
+    await symlink(join(root, "outside.txt"), join(source, "lib", "leak"));
+
+    await expect(copyTreeForImport(source, join(root, "store", "skills", "review")))
+      .rejects.toThrow(/nested symlink/u);
+  });
+});
