@@ -41,6 +41,10 @@ import {
   type HookScriptEntry,
 } from "../core/hook-scripts.js";
 import type { HookScriptLayout } from "./adapter.js";
+import {
+  assertOutputStyleName,
+  type OutputStyleEntry,
+} from "../core/output-styles.js";
 
 const CLAUDE_RESERVED_MCP_SERVER_NAMES = new Set([
   "workspace",
@@ -1281,6 +1285,51 @@ export async function importHookScripts(
   }
   entries.sort((a, b) => a.name.localeCompare(b.name));
   return { entries, warnings };
+}
+
+/**
+ * Sweep a target's output-style directory into one canonical entry per file.
+ * Flat by construction — Claude reads only the top level — and Markdown only,
+ * so anything else in the directory is left unmanaged rather than adopted.
+ */
+export async function importOutputStyles(
+  sourceDir: string,
+  storeDir: string,
+  write: boolean,
+  managedPaths: readonly string[] | undefined,
+  nativeRoot: string,
+  canonicalSourceStoreDir?: string,
+): Promise<OutputStyleEntry[]> {
+  if (!(await pathExists(sourceDir))) return [];
+  await assertNativeImportPath(sourceDir, nativeRoot);
+  const discovered: Array<{ name: string; path: string; source: string }> = [];
+  for (const child of await readdir(sourceDir, { withFileTypes: true })) {
+    if (!child.isFile() || !child.name.endsWith(".md")) continue;
+    const source = join(sourceDir, child.name);
+    if (!capturePathAllowed(source, managedPaths ? [...managedPaths, sourceDir] : undefined)) {
+      continue;
+    }
+    assertOutputStyleName(child.name);
+    discovered.push({ name: child.name, path: `output-styles/${child.name}`, source });
+  }
+  assertUniqueImportedNames(discovered, "output style");
+  const entries: OutputStyleEntry[] = [];
+  for (const entry of discovered) {
+    const destination = resolveInside(storeDir, entry.path);
+    if (write && relative(entry.source, destination) !== "") {
+      await assertNativeImportPath(
+        entry.source,
+        nativeRoot,
+        canonicalSourceStoreDir
+          ? [destination, resolveInside(canonicalSourceStoreDir, entry.path)]
+          : destination,
+      );
+      await copyFileAtomicInside(storeDir, entry.source, destination);
+    }
+    entries.push({ name: entry.name, path: entry.path });
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  return entries;
 }
 
 /**

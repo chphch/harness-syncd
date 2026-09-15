@@ -54,6 +54,7 @@ import {
   mergeMcpServerOverlays,
   readJsonObject,
   importHookScripts,
+  importOutputStyles,
   renderHooks,
   scanHookScriptReferences,
   renderMcpServers,
@@ -202,6 +203,26 @@ export class ClaudeAdapter implements HarnessAdapter {
           ];
           imported.push(hookScriptLayout.dir);
         }
+      }
+      const outputStyles = await importOutputStyles(
+        paths.outputStyles,
+        context.storeDir,
+        options.write,
+        options.managedPaths,
+        nativeRoot,
+        context.canonicalSourceStoreDir,
+      );
+      // Same two guards as hookScripts: the length check keeps a store that
+      // never used the feature from gaining an empty list (which the next apply
+      // would read as "own nothing" and prune), and the name-keyed filter
+      // protects entries outside a managed-paths-restricted capture.
+      if (outputStyles.length > 0) {
+        const capturedNames = new Set(outputStyles.map((entry) => entry.name));
+        harness.outputStyles = [
+          ...(harness.outputStyles ?? []).filter((entry) => !capturedNames.has(entry.name)),
+          ...outputStyles,
+        ];
+        imported.push(paths.outputStyles);
       }
       const agents = await importAgents(
         paths.agents,
@@ -545,6 +566,12 @@ export class ClaudeAdapter implements HarnessAdapter {
         join(paths.skills, skill.name),
       );
     }
+    for (const style of harness.outputStyles ?? []) {
+      await writer.file(
+        resolveInside(context.storeDir, style.path),
+        join(paths.outputStyles, style.name),
+      );
+    }
     // Gated on the LAYOUT, not on claudePaths, so one decision governs both the
     // bytes and any future handling of the commands. Per entry, never the
     // parent directory — copyFileAtomic creates nested parents itself.
@@ -834,6 +861,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       // watched leaf, so a watched directory that is a symlink into the store
       // makes every command throw. Per-FILE projection keeps it real.
       paths.hookScripts,
+      paths.outputStyles,
     ];
   }
 
@@ -878,6 +906,7 @@ function claudePaths(context: AdapterContext) {
       commands: join(base, "commands"),
       settings: join(base, "settings.json"),
       hookScripts: join(base, "hooks"),
+      outputStyles: join(base, "output-styles"),
       localSettings: undefined,
       mcp: join(base, "..", ".claude.json"),
       alternateInstructions: undefined,
@@ -892,6 +921,7 @@ function claudePaths(context: AdapterContext) {
     commands: join(base, ".claude", "commands"),
     settings: join(base, ".claude", "settings.json"),
     hookScripts: join(base, ".claude", "hooks"),
+    outputStyles: join(base, ".claude", "output-styles"),
     localSettings: join(base, ".claude", "settings.local.json"),
     mcp: join(base, ".mcp.json"),
     alternateInstructions: join(base, ".claude", "CLAUDE.md"),

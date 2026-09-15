@@ -1,6 +1,7 @@
 import { access, lstat, readFile } from "node:fs/promises";
 import { normalizeSecretAllowlist } from "./secret-allowlist.js";
 import { normalizeHookScripts } from "./hook-scripts.js";
+import { normalizeOutputStyles } from "./output-styles.js";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -338,6 +339,9 @@ function normalizeHarness(
     ...(value.hookScripts === undefined
       ? {}
       : { hookScripts: normalizeHookScripts(value.hookScripts) }),
+    ...(value.outputStyles === undefined
+      ? {}
+      : { outputStyles: normalizeOutputStyles(value.outputStyles) }),
     // The spread carries an overlay for a target this binary does not know
     // through a load/write cycle instead of deleting it; the TARGET_NAMES
     // rebuild keeps `Record<TargetName, TargetOverlay>` true at runtime, which

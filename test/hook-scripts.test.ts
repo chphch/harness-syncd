@@ -304,3 +304,71 @@ describe("hook script sync", () => {
       .not.toThrow();
   });
 });
+
+describe("output style sync", () => {
+  async function seedWithStyle(prefix: string): Promise<string> {
+    const root = await tempRoot(prefix);
+    await mkdir(join(root, ".claude", "output-styles"), { recursive: true });
+    await writeFile(join(root, "CLAUDE.md"), "# Instructions\n", "utf8");
+    await writeFile(
+      join(root, ".claude", "output-styles", "custom.md"),
+      "---\nname: Custom\ndescription: A style\n---\n\nBe brief.\n",
+      "utf8",
+    );
+    await writeFile(
+      join(root, ".claude", "settings.json"),
+      `${JSON.stringify({ outputStyle: "Custom" }, null, 2)}\n`,
+      "utf8",
+    );
+    return root;
+  }
+
+  it("carries the style file alongside the setting that selects it", async () => {
+    const source = await seedWithStyle("output-styles-source-");
+    const sourceProject = await initializeProject(source);
+    await migrateFrom(sourceProject, "claude", migrateOptions);
+
+    const harness = await loadHarness(sourceProject.storeDir);
+    expect(harness.outputStyles?.map((e) => e.name)).toEqual(["custom.md"]);
+    // The setting travels in the settings passthrough; without the file beside
+    // it the second machine selects a style that does not exist there.
+    expect(harness.overlays.claude.settings?.outputStyle).toBe("Custom");
+
+    const second = await tempRoot("output-styles-target-");
+    const secondStore = join(second, ".harness-sync");
+    await cp(sourceProject.storeDir, secondStore, { recursive: true });
+    for (const runtime of [".state.json", ".managed.json", ".lock", "backups", "conflicts"]) {
+      await rm(join(secondStore, runtime), { recursive: true, force: true });
+    }
+    const secondProject = await initializeProject(second, { store: secondStore });
+    await applyHarness(secondProject, await loadHarness(secondStore), {
+      dryRun: false,
+      force: true,
+    });
+
+    const projected = join(second, ".claude", "output-styles", "custom.md");
+    expect(await pathExists(projected)).toBe(true);
+    expect(await readFile(projected, "utf8")).toContain("name: Custom");
+  });
+
+  it("takes only Markdown from the directory", async () => {
+    const root = await seedWithStyle("output-styles-filter-");
+    await writeFile(join(root, ".claude", "output-styles", "notes.txt"), "scratch\n", "utf8");
+    await mkdir(join(root, ".claude", "output-styles", "sub"), { recursive: true });
+
+    const project = await initializeProject(root);
+    await migrateFrom(project, "claude", migrateOptions);
+    const names = (await loadHarness(project.storeDir)).outputStyles?.map((e) => e.name) ?? [];
+    expect(names).toEqual(["custom.md"]);
+  });
+
+  it("keeps a store that never used the feature byte-identical", async () => {
+    const root = await tempRoot("output-styles-absent-");
+    await writeFile(join(root, "CLAUDE.md"), "# Instructions\n", "utf8");
+    const project = await initializeProject(root);
+    const before = await readFile(join(project.storeDir, "harness.yaml"), "utf8");
+    await writeHarness(project.storeDir, await loadHarness(project.storeDir));
+    expect(await readFile(join(project.storeDir, "harness.yaml"), "utf8")).toBe(before);
+    expect(before).not.toContain("outputStyles");
+  });
+});

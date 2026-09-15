@@ -106,6 +106,7 @@ export interface TargetOverlay {
 
 import type { SecretAllowlistEntry } from "./core/secret-allowlist.js";
 import type { HookScriptEntry } from "./core/hook-scripts.js";
+import type { OutputStyleEntry } from "./core/output-styles.js";
 
 export interface CanonicalHarness {
   schemaVersion: 1;
@@ -141,6 +142,12 @@ export interface CanonicalHarness {
    * feature — and an empty list is what makes `writer.finish` prune the
    * projected scripts. */
   hookScripts?: HookScriptEntry[];
+  /** Claude output styles: Markdown files whose frontmatter `name` is what the
+   * `outputStyle` setting selects. The setting travels in the settings
+   * passthrough already, so without these the projected store names a style
+   * whose file was never carried. Optional for the same reason as the two
+   * fields above. */
+  outputStyles?: OutputStyleEntry[];
   overlays: Record<TargetName, TargetOverlay>;
 }
 

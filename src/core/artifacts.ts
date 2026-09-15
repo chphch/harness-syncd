@@ -28,5 +28,6 @@ export function canonicalArtifactPaths(harness: CanonicalHarness): string[] {
     // leaving a harness.yaml that declares scripts the store does not contain,
     // because `hashCanonicalContent` hashes this same list and compares equal.
     ...(harness.hookScripts ?? []).map((entry) => entry.path),
+    ...(harness.outputStyles ?? []).map((entry) => entry.path),
   ])];
 }

@@ -5,6 +5,7 @@ import { TARGET_NAMES, type CanonicalHarness, type TargetName } from "../types.j
 import { isRecord } from "./frontmatter.js";
 import { pathExists, resolveInside } from "./fs.js";
 import { assertHookScriptName } from "./hook-scripts.js";
+import { assertOutputStyleName } from "./output-styles.js";
 
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_MCP_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
@@ -270,6 +271,7 @@ export async function validateHarness(
   validateHooks(harness.hooks);
   validateOverlays(harness.overlays);
   await validateHookScripts(storeDir, harness);
+  await validateOutputStyles(storeDir, harness);
 }
 
 async function validateArtifact(
@@ -684,6 +686,32 @@ function validateHooks(value: unknown): void {
         }
       }
     }
+  }
+}
+
+async function validateOutputStyles(
+  storeDir: string,
+  harness: CanonicalHarness,
+): Promise<void> {
+  if (harness.outputStyles === undefined) return;
+  const names = new Set<string>();
+  for (const entry of harness.outputStyles) {
+    if (!entry || typeof entry.name !== "string" || typeof entry.path !== "string") {
+      throw new Error("Invalid output style entry: expected string name and path");
+    }
+    assertOutputStyleName(entry.name);
+    const folded = entry.name.toLowerCase();
+    if (names.has(folded)) {
+      throw new Error(`Duplicate output style name (case-insensitive): ${entry.name}`);
+    }
+    names.add(folded);
+    await validateArtifact(
+      storeDir,
+      entry.path,
+      `output style ${entry.name}`,
+      "output-styles",
+      "file",
+    );
   }
 }
 
