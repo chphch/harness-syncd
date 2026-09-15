@@ -82,3 +82,15 @@ export function normalizeNamedFiles(
     return { name, path };
   });
 }
+
+/** Claude keeps two more authored directories that no other vendor documents:
+ * `scripts/` (helper programs its hooks and commands invoke — the reason a hook
+ * can break on a second machine) and `workflows/`. Both are code, so they are
+ * imported and projected like hook scripts rather than like documents. */
+export function normalizeScripts(value: unknown): NamedFileEntry[] {
+  return normalizeNamedFiles(value, "scripts", "scripts", "script");
+}
+
+export function normalizeWorkflows(value: unknown): NamedFileEntry[] {
+  return normalizeNamedFiles(value, "workflows", "workflows", "workflow");
+}

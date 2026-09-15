@@ -53,7 +53,7 @@ import {
   mcpServerOverlays,
   mergeMcpServerOverlays,
   readJsonObject,
-  importHookScripts,
+  importExecutableDirectory,
   importOutputStyles,
   renderHooks,
   scanHookScriptReferences,
@@ -173,35 +173,63 @@ export class ClaudeAdapter implements HarnessAdapter {
         ];
         imported.push(paths.skills);
       }
+      // Three directories of authored code, captured the same way. The
+      // `length > 0` guard does double duty everywhere it appears: the importer
+      // returns [] for a missing directory, so a plain assignment on a freshly
+      // cloned machine would write an empty list that the next apply reads as
+      // "own nothing" and prunes, and it is also what keeps absent-stays-absent
+      // true for stores that never used the feature. The name-keyed filter is a
+      // separate guard, for a capture restricted to already-owned paths.
       const hookScriptLayout = this.hookScripts(context);
-      if (hookScriptLayout) {
-        const importedScripts = await importHookScripts(
-          hookScriptLayout,
+      const codeDirs: Array<{
+        dir: string | undefined;
+        prefix: string;
+        kind: string;
+        read: () => readonly { name: string; path: string }[] | undefined;
+        write: (entries: { name: string; path: string }[]) => void;
+      }> = [
+        {
+          dir: hookScriptLayout?.dir,
+          prefix: "hook-scripts",
+          kind: "hook-script",
+          read: () => harness.hookScripts,
+          write: (entries) => { harness.hookScripts = entries; },
+        },
+        {
+          dir: paths.scripts,
+          prefix: "scripts",
+          kind: "script",
+          read: () => harness.scripts,
+          write: (entries) => { harness.scripts = entries; },
+        },
+        {
+          dir: paths.workflows,
+          prefix: "workflows",
+          kind: "workflow",
+          read: () => harness.workflows,
+          write: (entries) => { harness.workflows = entries; },
+        },
+      ];
+      for (const codeDir of codeDirs) {
+        if (!codeDir.dir) continue;
+        const imported_ = await importExecutableDirectory(
+          codeDir.dir,
+          codeDir.prefix,
+          codeDir.kind,
           context.storeDir,
           options.write,
           options.managedPaths,
           nativeRoot,
           context.canonicalSourceStoreDir,
         );
-        warnings.push(...importedScripts.warnings);
-        // The `length > 0` guard does double duty. It is the non-destruction
-        // guard — the importer returns [] for a missing directory, so a plain
-        // assignment on a freshly cloned machine would write `hookScripts: []`,
-        // which the next apply turns into a prune of every projected script.
-        // It is also what keeps absent-stays-absent true for stores that never
-        // used the feature. The name-keyed filter is a separate guard, for a
-        // capture restricted to already-owned paths.
-        if (importedScripts.entries.length > 0) {
-          const capturedNames = new Set(
-            importedScripts.entries.map((entry) => entry.name),
-          );
-          harness.hookScripts = [
-            ...(harness.hookScripts ?? []).filter(
-              (entry) => !capturedNames.has(entry.name),
-            ),
-            ...importedScripts.entries,
-          ];
-          imported.push(hookScriptLayout.dir);
+        warnings.push(...imported_.warnings);
+        if (imported_.entries.length > 0) {
+          const capturedNames = new Set(imported_.entries.map((entry) => entry.name));
+          codeDir.write([
+            ...(codeDir.read() ?? []).filter((entry) => !capturedNames.has(entry.name)),
+            ...imported_.entries,
+          ]);
+          imported.push(codeDir.dir);
         }
       }
       const outputStyles = await importOutputStyles(
@@ -584,6 +612,19 @@ export class ClaudeAdapter implements HarnessAdapter {
         );
       }
     }
+    // Code, like hook scripts: materialized so the exec bit survives and the
+    // target's runtime never writes into the canonical store through a link.
+    for (const [dir, entries] of [
+      [paths.scripts, harness.scripts],
+      [paths.workflows, harness.workflows],
+    ] as const) {
+      for (const entry of entries ?? []) {
+        await writer.materialize(
+          resolveInside(context.storeDir, entry.path),
+          join(dir, entry.name),
+        );
+      }
+    }
     for (const [name, agent] of Object.entries(harness.agents)) {
       const destination = resolveInside(
         paths.agents,
@@ -862,6 +903,8 @@ export class ClaudeAdapter implements HarnessAdapter {
       // makes every command throw. Per-FILE projection keeps it real.
       paths.hookScripts,
       paths.outputStyles,
+      paths.scripts,
+      paths.workflows,
     ];
   }
 
@@ -907,6 +950,8 @@ function claudePaths(context: AdapterContext) {
       settings: join(base, "settings.json"),
       hookScripts: join(base, "hooks"),
       outputStyles: join(base, "output-styles"),
+      scripts: join(base, "scripts"),
+      workflows: join(base, "workflows"),
       localSettings: undefined,
       mcp: join(base, "..", ".claude.json"),
       alternateInstructions: undefined,
@@ -922,6 +967,8 @@ function claudePaths(context: AdapterContext) {
     settings: join(base, ".claude", "settings.json"),
     hookScripts: join(base, ".claude", "hooks"),
     outputStyles: join(base, ".claude", "output-styles"),
+    scripts: join(base, ".claude", "scripts"),
+    workflows: join(base, ".claude", "workflows"),
     localSettings: join(base, ".claude", "settings.local.json"),
     mcp: join(base, ".mcp.json"),
     alternateInstructions: join(base, ".claude", "CLAUDE.md"),

@@ -29,5 +29,7 @@ export function canonicalArtifactPaths(harness: CanonicalHarness): string[] {
     // because `hashCanonicalContent` hashes this same list and compares equal.
     ...(harness.hookScripts ?? []).map((entry) => entry.path),
     ...(harness.outputStyles ?? []).map((entry) => entry.path),
+    ...(harness.scripts ?? []).map((entry) => entry.path),
+    ...(harness.workflows ?? []).map((entry) => entry.path),
   ])];
 }

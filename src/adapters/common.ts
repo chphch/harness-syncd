@@ -37,10 +37,12 @@ import {
 import { assertArtifactName } from "../core/validate.js";
 import {
   GENERATED_DIRECTORY_NAMES,
-  assertHookScriptName,
-  type HookScriptEntry,
 } from "../core/hook-scripts.js";
 import type { HookScriptLayout } from "./adapter.js";
+import {
+  assertNamedFileName,
+  type NamedFileEntry,
+} from "../core/named-files.js";
 import {
   assertOutputStyleName,
   type OutputStyleEntry,
@@ -1199,17 +1201,19 @@ export async function importCommands(
  * managed change; owning each file individually means a generated file is
  * simply not a managed path.
  */
-export async function importHookScripts(
-  layout: HookScriptLayout,
+export async function importExecutableDirectory(
+  sourceDir: string,
+  storePrefix: string,
+  kind: string,
   storeDir: string,
   write: boolean,
   managedPaths: readonly string[] | undefined,
   nativeRoot: string,
   canonicalSourceStoreDir?: string,
-): Promise<{ entries: HookScriptEntry[]; warnings: AdapterWarning[] }> {
+): Promise<{ entries: NamedFileEntry[]; warnings: AdapterWarning[] }> {
   const warnings: AdapterWarning[] = [];
-  if (!(await pathExists(layout.dir))) return { entries: [], warnings };
-  await assertNativeImportPath(layout.dir, nativeRoot);
+  if (!(await pathExists(sourceDir))) return { entries: [], warnings };
+  await assertNativeImportPath(sourceDir, nativeRoot);
 
   const discovered: Array<{ name: string; path: string; source: string }> = [];
   const walk = async (directory: string, prefix: string): Promise<void> => {
@@ -1219,7 +1223,7 @@ export async function importHookScripts(
       const name = prefix === "" ? child.name : `${prefix}/${child.name}`;
       if ((GENERATED_DIRECTORY_NAMES as readonly string[]).includes(child.name)) {
         warnings.push({
-          code: "hook-script-generated-path-excluded",
+          code: `${kind}-generated-path-excluded`,
           message:
             `${child.name} holds machine-generated files that are rebuilt from source; it was not imported`,
           path: source,
@@ -1229,7 +1233,7 @@ export async function importHookScripts(
       }
       if (child.name.startsWith(".")) {
         warnings.push({
-          code: "hook-script-hidden-path-excluded",
+          code: `${kind}-hidden-path-excluded`,
           message:
             "Hidden paths inside a hook-script directory are runtime state, not authored content; it was not imported",
           path: source,
@@ -1243,7 +1247,7 @@ export async function importHookScripts(
       // private key would copy it into a Git-synchronized store.
       if (child.isSymbolicLink() || (!child.isDirectory() && !child.isFile())) {
         warnings.push({
-          code: "hook-script-non-regular-path-skipped",
+          code: `${kind}-non-regular-path-skipped`,
           message:
             "Only regular files are imported as hook scripts; a symlink or special file was skipped",
           path: source,
@@ -1255,19 +1259,19 @@ export async function importHookScripts(
         await walk(source, name);
         continue;
       }
-      assertHookScriptName(name);
-      discovered.push({ name, path: `hook-scripts/${name}`, source });
+      assertNamedFileName(name, kind);
+      discovered.push({ name, path: `${storePrefix}/${name}`, source });
     }
   };
-  await walk(layout.dir, "");
-  assertUniqueImportedNames(discovered, "hook script");
+  await walk(sourceDir, "");
+  assertUniqueImportedNames(discovered, kind);
 
-  const entries: HookScriptEntry[] = [];
+  const entries: NamedFileEntry[] = [];
   for (const entry of discovered) {
     // `layout.dir` is load-bearing: with per-file entries the DIRECTORY is
     // never itself a managed path, so an inverse capture restricted to owned
     // paths could never adopt a newly authored hook script.
-    if (!capturePathAllowed(entry.source, managedPaths ? [...managedPaths, layout.dir] : undefined)) {
+    if (!capturePathAllowed(entry.source, managedPaths ? [...managedPaths, sourceDir] : undefined)) {
       continue;
     }
     const destination = resolveInside(storeDir, entry.path);

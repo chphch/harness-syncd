@@ -107,6 +107,7 @@ export interface TargetOverlay {
 import type { SecretAllowlistEntry } from "./core/secret-allowlist.js";
 import type { HookScriptEntry } from "./core/hook-scripts.js";
 import type { OutputStyleEntry } from "./core/output-styles.js";
+import type { NamedFileEntry } from "./core/named-files.js";
 
 export interface CanonicalHarness {
   schemaVersion: 1;
@@ -148,6 +149,12 @@ export interface CanonicalHarness {
    * whose file was never carried. Optional for the same reason as the two
    * fields above. */
   outputStyles?: OutputStyleEntry[];
+  /** Helper programs Claude's hooks and commands invoke (`scripts/`), and its
+   * workflow scripts (`workflows/`). Executable code, so they travel like hook
+   * scripts. Without `scripts/` a hook that requires from it dies on a second
+   * machine — measured: session-start.js does exactly that. */
+  scripts?: NamedFileEntry[];
+  workflows?: NamedFileEntry[];
   overlays: Record<TargetName, TargetOverlay>;
 }
 

@@ -6,6 +6,7 @@ import { isRecord } from "./frontmatter.js";
 import { pathExists, resolveInside } from "./fs.js";
 import { assertHookScriptName } from "./hook-scripts.js";
 import { assertOutputStyleName } from "./output-styles.js";
+import { assertNamedFileName } from "./named-files.js";
 
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_MCP_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
@@ -272,6 +273,8 @@ export async function validateHarness(
   validateOverlays(harness.overlays);
   await validateHookScripts(storeDir, harness);
   await validateOutputStyles(storeDir, harness);
+  await validateNamedFileList(storeDir, harness.scripts, "scripts", "script");
+  await validateNamedFileList(storeDir, harness.workflows, "workflows", "workflow");
 }
 
 async function validateArtifact(
@@ -686,6 +689,28 @@ function validateHooks(value: unknown): void {
         }
       }
     }
+  }
+}
+
+async function validateNamedFileList(
+  storeDir: string,
+  entries: Array<{ name: string; path: string }> | undefined,
+  root: string,
+  kind: string,
+): Promise<void> {
+  if (entries === undefined) return;
+  const names = new Set<string>();
+  for (const entry of entries) {
+    if (!entry || typeof entry.name !== "string" || typeof entry.path !== "string") {
+      throw new Error(`Invalid ${kind} entry: expected string name and path`);
+    }
+    assertNamedFileName(entry.name, kind);
+    const folded = entry.name.toLowerCase();
+    if (names.has(folded)) {
+      throw new Error(`Duplicate ${kind} name (case-insensitive): ${entry.name}`);
+    }
+    names.add(folded);
+    await validateArtifact(storeDir, entry.path, `${kind} ${entry.name}`, root, "file");
   }
 }
 
