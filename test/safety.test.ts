@@ -1,5 +1,6 @@
 import {
   chmod,
+  utimes,
   mkdir,
   mkdtemp,
   readFile,
@@ -23,6 +24,7 @@ import {
   writeHarness,
 } from "../src/core/config.js";
 import {
+  acquireLock,
   copyTreeForImport,
   hashNativePath,
   hashPath,
@@ -1245,5 +1247,67 @@ describe("foreign target overlays", () => {
     await expect(validateHarness(store, harness as never)).rejects.toThrow(
       /Invalid overlays\.codex/u,
     );
+  });
+});
+
+describe("stale lock reclamation", () => {
+  const OLD = new Date(Date.now() - 10 * 60 * 1000);
+
+  it("reclaims a lock whose recorded holder is gone", async () => {
+    const root = await tempRoot();
+    const lock = join(root, ".lock");
+    // pid 2^22 is above every real pid on macOS and Linux, so it is reliably dead.
+    await writeFile(lock, "4194304:dead-holder\n", "utf8");
+    await utimes(lock, OLD, OLD);
+
+    const release = await acquireLock(lock);
+    expect(await readFile(lock, "utf8")).toContain(`${process.pid}:`);
+    await release();
+    expect(await pathExists(lock)).toBe(false);
+  });
+
+  it("reclaims an empty lock left by a crash between create and write", async () => {
+    const root = await tempRoot();
+    const lock = join(root, ".lock");
+    await writeFile(lock, "", "utf8");
+    await utimes(lock, OLD, OLD);
+
+    const release = await acquireLock(lock);
+    expect(await readFile(lock, "utf8")).toContain(`${process.pid}:`);
+    await release();
+  });
+
+  it("never reclaims a lock whose holder is alive", async () => {
+    const root = await tempRoot();
+    const lock = join(root, ".lock");
+    // This very process is the holder, and it is obviously running.
+    await writeFile(lock, `${process.pid}:someone-else\n`, "utf8");
+    await utimes(lock, OLD, OLD);
+
+    await expect(acquireLock(lock)).rejects.toThrow(/another harness-sync process holds/u);
+    expect(await readFile(lock, "utf8")).toContain("someone-else");
+  });
+
+  it("never reclaims a freshly written lock, even from a dead pid", async () => {
+    const root = await tempRoot();
+    const lock = join(root, ".lock");
+    await writeFile(lock, "4194304:dead-holder\n", "utf8");
+
+    // The grace window is what stops a lock written microseconds ago from being
+    // read as debris; without it a real race becomes a double acquire.
+    await expect(acquireLock(lock)).rejects.toThrow(/another harness-sync process holds/u);
+    expect(await readFile(lock, "utf8")).toContain("dead-holder");
+  });
+
+  it("only one of two concurrent acquirers wins the same debris", async () => {
+    const root = await tempRoot();
+    const lock = join(root, ".lock");
+    await writeFile(lock, "4194304:dead-holder\n", "utf8");
+    await utimes(lock, OLD, OLD);
+
+    const results = await Promise.allSettled([acquireLock(lock), acquireLock(lock)]);
+    const won = results.filter((r) => r.status === "fulfilled");
+    expect(won).toHaveLength(1);
+    await (won[0] as PromiseFulfilledResult<() => Promise<void>>).value();
   });
 });

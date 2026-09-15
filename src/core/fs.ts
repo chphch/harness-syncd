@@ -528,6 +528,40 @@ export async function listFilesRecursive(path: string): Promise<string[]> {
   return output.sort();
 }
 
+/** A lock younger than this is never reclaimed, whatever its recorded pid says.
+ * It bounds the window in which a lock written microseconds ago — by a process
+ * whose pid has not yet appeared to us, or whose pid was recycled — could be
+ * mistaken for debris. A daemon that died leaves a lock far older than this. */
+const LOCK_STALE_GRACE_MS = 30_000;
+
+async function lockAgeMs(path: string): Promise<number | null> {
+  try {
+    return Date.now() - (await stat(path)).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decide whether an existing lock is debris from a dead holder.
+ *
+ * Every input is read in the direction that REFUSES to reclaim when unsure:
+ * - `processIsAlive` returns true for anything but ESRCH, so a recycled pid or
+ *   a holder owned by another user reads as alive and we leave it alone;
+ * - an unreadable age reads as "too young";
+ * - an unparseable owner is reclaimed only once it is also old, which is what a
+ *   process crashing between open() and its first write leaves behind.
+ * The cost of refusing is a stuck command the operator can see; the cost of a
+ * wrong reclaim is two writers in one store.
+ */
+async function lockIsAbandoned(path: string, owner: string | null): Promise<boolean> {
+  const age = await lockAgeMs(path);
+  if (age === null || age < LOCK_STALE_GRACE_MS) return false;
+  const pid = owner ? Number(owner.split(":", 1)[0]) : Number.NaN;
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  return !processIsAlive(pid);
+}
+
 export async function acquireLock(path: string): Promise<() => Promise<void>> {
   await mkdir(dirname(path), { recursive: true });
   const token = `${process.pid}:${randomUUID()}`;
@@ -538,15 +572,29 @@ export async function acquireLock(path: string): Promise<() => Promise<void>> {
   } catch (error) {
     if (!(isNodeError(error) && error.code === "EEXIST")) throw error;
     const owner = await readTextIfExists(path);
-    const pid = owner ? Number(owner.split(":", 1)[0]) : Number.NaN;
-    const stale = Number.isInteger(pid) && pid > 0 && !processIsAlive(pid);
-    throw new Error(
-      stale
-        ? `stale harness-sync lock at ${path}; verify no process is running, then remove this exact lock file manually`
-        : `another harness-sync process holds ${path}`,
-    );
+    if (!(await lockIsAbandoned(path, owner))) {
+      throw new Error(`another harness-sync process holds ${path}`);
+    }
+    // Reclaim once, never in a loop: unlink the debris and re-race for the
+    // file. open(wx) is the atomic claim, so a peer that reclaimed first simply
+    // wins and we report ordinary contention rather than taking the lock twice.
+    await rm(path, { force: true });
+    try {
+      handle = await openLock();
+    } catch (retryError) {
+      if (isNodeError(retryError) && retryError.code === "EEXIST") {
+        throw new Error(`another harness-sync process holds ${path}`);
+      }
+      throw retryError;
+    }
   }
   await handle.writeFile(`${token}\n`, "utf8");
+  // Confirm the file still carries OUR token. Two processes reclaiming the same
+  // debris can both unlink, and the loser must not believe it holds the lock.
+  if ((await readTextIfExists(path))?.trim() !== token) {
+    await handle.close();
+    throw new Error(`another harness-sync process holds ${path}`);
+  }
   return async () => {
     await handle.close();
     if ((await readTextIfExists(path))?.trim() === token) {
