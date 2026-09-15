@@ -39,7 +39,10 @@ const EXCLUDED_FILES = new Set([
   ".managed.json",
   ".state.json",
 ]);
-const MAX_SCANNED_FILE_BYTES = 2 * 1024 * 1024;
+/** Exported so a gate that screens one candidate before it enters the store
+ * uses the same number the store-wide scan refuses on, rather than a second
+ * copy of it that can drift. */
+export const MAX_SCANNED_FILE_BYTES = 2 * 1024 * 1024;
 const MIN_LITERAL_SECRET_LENGTH = 12;
 const SECRET_FIELD_NAME =
   "(?:api[_-]?key|access[_-]?token|client[_-]?secret|token|secret|password|passwd|authorization|credential|private[_-]?key|cookie|session[_-]?key)";
@@ -49,6 +52,15 @@ const SECRET_FIELD_ASSIGNMENT = new RegExp(
   `(?:^|[^A-Za-z\\d])(?:(["'])${SECRET_FIELD_NAME}\\1|${SECRET_FIELD_NAME})\\s*[=:]\\s*`,
   "giu",
 );
+
+// A plist spreads one assignment across two lines, so no single-line rule above
+// can see it. Bare `key` is deliberately NOT part of SECRET_FIELD_NAME, which is
+// what keeps this from matching every `<key>` tag in the file.
+const PLIST_SECRET_KEY = new RegExp(
+  `^\\s*<key>\\s*[A-Za-z\\d_.\\- ]*?${SECRET_FIELD_NAME}[A-Za-z\\d_.\\- ]*\\s*</key>\\s*$`,
+  "iu",
+);
+const PLIST_STRING_VALUE = /^\s*<string>\s*([^<]*?)\s*<\/string>\s*$/u;
 
 const RULES: Array<{ name: string; pattern: RegExp }> = [
   { name: "private-key", pattern: /-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----/u },
@@ -118,31 +130,73 @@ export async function scanStoreForSecrets(storeDir: string): Promise<SecretFindi
     } finally {
       await handle?.close();
     }
-    for (const [index, line] of input.split("\n").entries()) {
-      // Hashed from the bytes this scan already read: re-reading the file at
-      // gate time would open a window where the scan saw a credential and the
-      // hash saw a placeholder.
-      const lineHash = hashScannedLine(line);
-      for (const rule of RULES) {
-        if (rule.pattern.test(line)) {
-          findings.push({ path: file, line: index + 1, rule: rule.name, lineHash });
-        }
-      }
-      if (hasLiteralSecretField(line)) {
-        findings.push({
-          path: file,
-          line: index + 1,
-          rule: "literal-secret-field",
-          lineHash,
-        });
-      }
-    }
+    findings.push(...scanTextForSecrets(file, input));
   }
   return findings.sort((left, right) =>
     left.path.localeCompare(right.path) ||
     left.line - right.line ||
     left.rule.localeCompare(right.rule),
   );
+}
+
+/**
+ * The per-file half of the scan. Exported so anything that screens a single
+ * candidate before it enters the store runs the SAME code the store-wide scan
+ * runs — two implementations would drift, and the one that drifts silently is
+ * always the gate.
+ */
+export function scanTextForSecrets(path: string, input: string): SecretFinding[] {
+  const findings: SecretFinding[] = [];
+  const lines = input.split("\n");
+  for (const [index, line] of lines.entries()) {
+    // Hashed from the bytes this scan already read: re-reading the file at
+    // gate time would open a window where the scan saw a credential and the
+    // hash saw a placeholder.
+    const lineHash = hashScannedLine(line);
+    for (const rule of RULES) {
+      if (rule.pattern.test(line)) {
+        findings.push({ path, line: index + 1, rule: rule.name, lineHash });
+      }
+    }
+    if (hasLiteralSecretField(line)) {
+      findings.push({ path, line: index + 1, rule: "literal-secret-field", lineHash });
+    }
+  }
+  findings.push(...scanPlistSecretFields(path, lines));
+  return findings;
+}
+
+/**
+ * `<key>API_TOKEN</key>` on one line and `<string>…</string>` on the next is one
+ * assignment written across two lines, which every rule above misses by
+ * construction. Measured before this rule existed: a plist carrying a real
+ * `xoxb-` Slack token produced ZERO findings, while the identical secret
+ * written `token: xoxb-…` produced `literal-secret-field`.
+ *
+ * The finding is reported against the VALUE line so an allowlist approval pins
+ * the bytes that carry the secret, not the key that names it — and so the
+ * approval lapses the moment the secret is rotated.
+ */
+function scanPlistSecretFields(path: string, lines: readonly string[]): SecretFinding[] {
+  const findings: SecretFinding[] = [];
+  for (const [index, line] of lines.entries()) {
+    if (!PLIST_SECRET_KEY.test(line)) continue;
+    const next = lines[index + 1] ?? "";
+    const value = PLIST_STRING_VALUE.exec(next)?.[1];
+    if (value === undefined) continue;
+    // A path is not a credential, and an EnvironmentVariables dict is mostly
+    // paths. Measured against this box's 50 real plists, admitting them is the
+    // difference between zero false positives and a rule nobody can ship.
+    if (value.startsWith("/") || value.startsWith("~/")) continue;
+    if (!hasLiteralSecretValue(value)) continue;
+    findings.push({
+      path,
+      line: index + 2,
+      rule: "plist-secret-field",
+      lineHash: hashScannedLine(next),
+    });
+  }
+  return findings;
 }
 
 function hasLiteralSecretField(line: string): boolean {

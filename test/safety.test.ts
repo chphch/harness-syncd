@@ -31,7 +31,11 @@ import {
   pathExists,
   snapshotNativePaths,
 } from "../src/core/fs.js";
-import { hashScannedLine, scanStoreForSecrets } from "../src/core/secret-scan.js";
+import {
+  hashScannedLine,
+  scanStoreForSecrets,
+  scanTextForSecrets,
+} from "../src/core/secret-scan.js";
 import {
   assertSecretAllowlist,
   normalizeSecretAllowlist,
@@ -1081,6 +1085,114 @@ async function tempRoot(): Promise<string> {
   roots.push(root);
   return root;
 }
+
+describe("plist secret rule", () => {
+  /** A plist writes one assignment across two lines, so every single-line rule
+   * misses it. These fixtures are the measurement that decided the rule was
+   * shippable: the first two must be found, the rest must not, and the last
+   * three are the exact shapes that fill a real EnvironmentVariables dict. */
+  function plist(...pairs: Array<[string, string]>): string {
+    return [
+      "<dict>",
+      ...pairs.flatMap(([key, value]) => [`\t<key>${key}</key>`, `\t<string>${value}</string>`]),
+      "</dict>",
+    ].join("\n");
+  }
+
+  it("reports the VALUE line, so an approval pins the secret's own bytes", () => {
+    const text = plist(["API_TOKEN", "abcdef0123456789abcdef"]);
+    const findings = scanTextForSecrets("job.plist", text)
+      .filter((finding) => finding.rule === "plist-secret-field");
+
+    expect(findings).toEqual([{
+      path: "job.plist",
+      line: 3,
+      rule: "plist-secret-field",
+      lineHash: hashScannedLine("\t<string>abcdef0123456789abcdef</string>"),
+    }]);
+    // The key line, deliberately NOT what the approval pins: rotating the
+    // secret must lapse the approval, and the key name never changes.
+    expect(findings[0]?.lineHash).not.toBe(hashScannedLine("\t<key>API_TOKEN</key>"));
+  });
+
+  it("catches a real token shape that produced zero findings before the rule", () => {
+    // Assembled at runtime: the literal is a shape GitHub push protection
+    // rejects on sight, and a fixture that cannot be pushed is not a fixture.
+    const token = ["xoxb", "1234567890", "abcdefghijklmnop"].join("-");
+    const text = plist(["SLACK_BOT_TOKEN", token]);
+
+    expect(scanTextForSecrets("job.plist", text).map((finding) => finding.rule))
+      .toContain("plist-secret-field");
+    // CANARY: the same secret on ONE line was always caught, which is why the
+    // gap was invisible. If this stops holding, the comparison is meaningless.
+    expect(scanTextForSecrets("job.sh", `token: ${token}`)
+      .map((finding) => finding.rule)).toContain("literal-secret-field");
+  });
+
+  it("stays silent on what an EnvironmentVariables dict actually holds", () => {
+    // Measured: zero plist-secret-field findings across this box's 50 real
+    // com.chphch.*.plist files, 42 of which carry an EnvironmentVariables dict.
+    const text = plist(
+      ["PATH", "/opt/homebrew/bin:/usr/bin:/bin"],
+      ["TOKEN_FILE", "/Users/someone/.secrets/token"],
+      ["SESSION_KEY_PATH", "~/.config/app/session"],
+      ["API_TOKEN", "${SOME_TOKEN}"],
+      ["CLIENT_SECRET", "$(cat /tmp/secret)"],
+      ["SecretLabel", "short"],
+      ["PASSWORD_PROMPT", "PleaseEnterYourPassword"],
+    );
+
+    expect(scanTextForSecrets("job.plist", text)
+      .filter((finding) => finding.rule === "plist-secret-field")).toEqual([]);
+  });
+
+  it("does not match a bare <key> tag, only one naming a credential", () => {
+    const text = plist(
+      ["Label", "com.example.job"],
+      ["ProgramArguments", "abcdef0123456789abcdef"],
+    );
+
+    expect(scanTextForSecrets("job.plist", text)).toEqual([]);
+  });
+
+  it("needs the <string> on the very next line", () => {
+    const text = [
+      "\t<key>API_TOKEN</key>",
+      "\t<!-- rotated 2026-09 -->",
+      "\t<string>abcdef0123456789abcdef</string>",
+    ].join("\n");
+
+    expect(scanTextForSecrets("job.plist", text)
+      .filter((finding) => finding.rule === "plist-secret-field")).toEqual([]);
+  });
+
+  it("is approvable by a reviewed allowlist entry, not permanently blocking", () => {
+    // The whole reason the finding carries a lineHash. A structural rule
+    // (oversized, binary) cannot be approved at all, so a misclassification
+    // here would mean one plist blocking every future sync of the store.
+    const text = plist(["API_TOKEN", "abcdef0123456789abcdef"]);
+    const findings = scanTextForSecrets("job.plist", text);
+
+    const partition = partitionByAllowlist(findings, [{
+      path: "job.plist",
+      rule: "plist-secret-field",
+      lineHash: hashScannedLine("\t<string>abcdef0123456789abcdef</string>"),
+      reason: "test fixture, not a live credential",
+    }]);
+
+    expect(partition.blocking).toEqual([]);
+    expect(partition.allowed).toHaveLength(1);
+  });
+
+  it("reaches the store-wide scan too, not only the exported helper", async () => {
+    const root = await tempRoot();
+    await writeFile(join(root, "job.plist"), `${plist(["API_TOKEN", "abcdef0123456789abcdef"])}\n`);
+
+    expect(await scanStoreForSecrets(root)).toContainEqual(
+      expect.objectContaining({ path: "job.plist", rule: "plist-secret-field" }),
+    );
+  });
+});
 
 describe("secret scan allowlist", () => {
   const PLACEHOLDER = 'export API_TOKEN="your-token-here"';
