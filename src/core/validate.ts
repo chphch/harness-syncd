@@ -7,6 +7,13 @@ import { isGeneratedDirectory, pathExists, resolveInside } from "./fs.js";
 import { assertHookScriptName } from "./hook-scripts.js";
 import { assertOutputStyleName } from "./output-styles.js";
 import { assertNamedFileName } from "./named-files.js";
+import {
+  CARRY_STORE_PREFIX,
+  assertCarryDestinationSpelling,
+  assertCarryEntriesDistinct,
+  assertCarryIncludePattern,
+  assertCarryName,
+} from "./carry-entry.js";
 
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_MCP_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
@@ -275,6 +282,55 @@ export async function validateHarness(
   await validateOutputStyles(storeDir, harness);
   await validateNamedFileList(storeDir, harness.scripts, "scripts", "script");
   await validateNamedFileList(storeDir, harness.workflows, "workflows", "workflow");
+  validateCarry(harness);
+}
+
+/**
+ * Grammar only — note the signature takes no `storeDir`, and that is the point.
+ *
+ * `validateArtifact` throws `Missing <label> artifact` for a declared file that
+ * is not on disk, and `validateHarness` gates reconcile, applyHarness, the
+ * scheduled backup and doctor. So calling it here would mean one carry store
+ * file lost to a bad merge bricks the whole tool on that machine — and capture
+ * could not heal it, because capture needs both `carry.enabled` and a live
+ * destination, neither of which a fresh clone has. A missing carry copy is a
+ * finding `carry list` and `doctor` report, never a reason to stop syncing.
+ */
+function validateCarry(harness: CanonicalHarness): void {
+  if (harness.carry === undefined) return;
+  const names = new Set<string>();
+  for (const entry of harness.carry) {
+    if (!entry || typeof entry.name !== "string" || typeof entry.path !== "string") {
+      throw new Error("Invalid carry entry: expected string name and path");
+    }
+    assertCarryName(entry.name);
+    const folded = entry.name.toLowerCase();
+    if (names.has(folded)) {
+      throw new Error(`Duplicate carry name (case-insensitive): ${entry.name}`);
+    }
+    names.add(folded);
+    if (entry.kind !== "file" && entry.kind !== "directory") {
+      throw new Error(`Invalid carry kind for ${entry.name}: expected "file" or "directory"`);
+    }
+    if (entry.path !== `${CARRY_STORE_PREFIX}/${entry.name}`) {
+      throw new Error(
+        `Invalid carry path for ${entry.name}: expected ` +
+          JSON.stringify(`${CARRY_STORE_PREFIX}/${entry.name}`),
+      );
+    }
+    assertCarryDestinationSpelling(entry.destination, `carry ${entry.name}`);
+    if (entry.kind === "directory") {
+      if (!Array.isArray(entry.include) || entry.include.length === 0) {
+        throw new Error(`Carry entry ${entry.name} must list at least one include pattern`);
+      }
+      for (const pattern of entry.include) {
+        assertCarryIncludePattern(pattern, `carry ${entry.name}`);
+      }
+    } else if (entry.include !== undefined) {
+      throw new Error(`Carry entry ${entry.name} is a file and must not list include patterns`);
+    }
+  }
+  assertCarryEntriesDistinct(harness.carry);
 }
 
 async function validateArtifact(

@@ -39,6 +39,11 @@ export interface ProjectConfig {
   targets: Record<TargetName, TargetConfig>;
   sync: SyncPolicy;
   git: GitPolicy;
+  /** Machine-local: whether THIS machine captures the carried files the store
+   * declares. Optional, so an existing harness-sync.yaml round-trips
+   * byte-identically, and off unless a machine says otherwise — a fresh clone
+   * must not become an authority on a payload it has never seen. */
+  carry?: { enabled: boolean };
 }
 
 export interface McpServer {
@@ -114,6 +119,7 @@ import type { SecretAllowlistEntry } from "./core/secret-allowlist.js";
 import type { HookScriptEntry } from "./core/hook-scripts.js";
 import type { OutputStyleEntry } from "./core/output-styles.js";
 import type { NamedFileEntry } from "./core/named-files.js";
+import type { CarryEntry } from "./core/carry-entry.js";
 
 export interface CanonicalHarness {
   schemaVersion: 1;
@@ -161,6 +167,13 @@ export interface CanonicalHarness {
    * machine — measured: session-start.js does exactly that. */
   scripts?: NamedFileEntry[];
   workflows?: NamedFileEntry[];
+  /** Ordinary files the store keeps a copy of because keeping them beside the
+   * harness is convenient — a launchd plist, a hand-written CLI, a plugin
+   * manifest. The ONLY kind whose destination is not derived from a target root
+   * and the only one with no adapter, which is why nothing projects it: carry
+   * is capture-only, and restoring a carried file is something you do yourself.
+   * Optional for the same reason as the fields above — absent stays absent. */
+  carry?: CarryEntry[];
   overlays: Record<TargetName, TargetOverlay>;
 }
 

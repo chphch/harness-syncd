@@ -3,6 +3,7 @@ import { normalizeSecretAllowlist } from "./secret-allowlist.js";
 import { normalizeHookScripts } from "./hook-scripts.js";
 import { normalizeOutputStyles } from "./output-styles.js";
 import { normalizeScripts, normalizeWorkflows } from "./named-files.js";
+import { normalizeCarry } from "./carry-entry.js";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -110,6 +111,7 @@ export async function loadProjectConfig(path: string): Promise<ProjectConfig> {
   assertOptionalConfigType(parsed, "targets", isRecord, path);
   assertOptionalConfigType(parsed, "sync", isRecord, path);
   assertOptionalConfigType(parsed, "git", isRecord, path);
+  assertOptionalConfigType(parsed, "carry", isRecord, path);
   const defaults = defaultProjectConfig(
     parsed.scope === "user" ? "user" : "project",
   );
@@ -190,6 +192,11 @@ export async function loadProjectConfig(path: string): Promise<ProjectConfig> {
       branch: stringOr(git.branch, defaults.git.branch),
       remote: stringOr(git.remote, defaults.git.remote),
     },
+    // Conditional, so a config that never mentions carry is written back
+    // unchanged; and `=== true`, so no truthy spelling ("true", "yes", 1) can
+    // switch capture on by accident. A flag that opts IN to touching files
+    // outside the store gets the strict compare.
+    ...(isRecord(parsed.carry) ? { carry: { enabled: parsed.carry.enabled === true } } : {}),
   };
 }
 
@@ -348,6 +355,7 @@ function normalizeHarness(
       : { outputStyles: normalizeOutputStyles(value.outputStyles) }),
     ...(value.scripts === undefined ? {} : { scripts: normalizeScripts(value.scripts) }),
     ...(value.workflows === undefined ? {} : { workflows: normalizeWorkflows(value.workflows) }),
+    ...(value.carry === undefined ? {} : { carry: normalizeCarry(value.carry) }),
     // The spread carries an overlay for a target this binary does not know
     // through a load/write cycle instead of deleting it; the TARGET_NAMES
     // rebuild keeps `Record<TargetName, TargetOverlay>` true at runtime, which
