@@ -1,16 +1,26 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
 import { lstat, mkdir, mkdtemp, stat, symlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { writeProjectConfig } from "../src/core/config.js";
-import { isUnwatchableEntry, watchProject } from "../src/core/daemon.js";
+import {
+  classifyWatchError,
+  isUnwatchableEntry,
+  watchProject,
+  type WatchWarning,
+} from "../src/core/daemon.js";
 import { initializeProject, type LoadedProject } from "../src/core/project.js";
 
 const roots: string[] = [];
 const children: ChildProcess[] = [];
+const originalWatch = fs.watch;
 
 afterEach(() => {
+  fs.watch = originalWatch;
+  syncBuiltinESMExports();
   for (const child of children.splice(0)) child.kill("SIGKILL");
   // `rm -rf`, not fs.rm: one fixture below builds a tree deeper than PATH_MAX,
   // which node's recursive rm cannot delete and BSD rm (fts) can.
@@ -76,6 +86,7 @@ function sleep(ms: number): Promise<void> {
 function runController(project: LoadedProject) {
   const abort = new AbortController();
   const errors: string[] = [];
+  const warnings: WatchWarning[] = [];
   let results = 0;
   const outcome = watchProject(project, {
     signal: abort.signal,
@@ -83,11 +94,12 @@ function runController(project: LoadedProject) {
       results += 1;
     },
     onError: (error) => errors.push(error.message),
+    onWarning: (warning) => warnings.push(warning),
   }).then(
     () => "resolved" as const,
     (error: unknown) => `rejected: ${error instanceof Error ? error.message : String(error)}`,
   );
-  return { abort, errors, outcome, results: () => results };
+  return { abort, errors, warnings, outcome, results: () => results };
 }
 
 describe("isUnwatchableEntry", () => {
@@ -194,3 +206,112 @@ describe.skipIf(process.platform === "win32")(
     }, 15_000);
   },
 );
+
+describe("classifyWatchError", () => {
+  const error = (code: string | undefined, extra: Record<string, unknown> = {}) =>
+    Object.assign(new Error(`${code}: x`), code === undefined ? {} : { code }, extra);
+
+  it("treats an fs.watch/stat/realpath error naming one absolute path as path-scoped", () => {
+    // macOS fs.watch on a socket: libuv has no name for EOPNOTSUPP (-102).
+    expect(classifyWatchError(error("UNKNOWN", { errno: -102, syscall: "watch", path: "/p" })))
+      .toBe("path");
+    expect(classifyWatchError(error("EACCES", { syscall: "watch", path: "/p" }))).toBe("path");
+    expect(classifyWatchError(error("ELOOP", { syscall: "stat", path: "/p" }))).toBe("path");
+    expect(classifyWatchError(error("EINVAL", { syscall: "realpath", path: "/p" }))).toBe("path");
+    for (const code of ["EOPNOTSUPP", "ENOTSUP", "ENXIO", "ENODEV", "ENAMETOOLONG", "EPERM"]) {
+      expect(classifyWatchError(error(code, { syscall: "watch", path: "/p" }))).toBe("path");
+    }
+  });
+
+  it("keeps resource exhaustion fatal: skipping paths would silently shrink coverage", () => {
+    for (const code of ["EMFILE", "ENFILE", "ENOSPC"]) {
+      expect(classifyWatchError(error(code, { syscall: "watch", path: "/p" }))).toBe("fatal");
+    }
+  });
+
+  it("keeps directory-stream errors fatal: chokidar never finishes that directory", () => {
+    // readdirp's lstat/scandir errors destroy the stream, so "ready" may never
+    // come. Treating them as skippable turned a startup failure into a hang.
+    expect(classifyWatchError(error("ENAMETOOLONG", { syscall: "lstat", path: "/abs" })))
+      .toBe("fatal");
+    expect(classifyWatchError(error("EACCES", { syscall: "scandir", path: "/abs" })))
+      .toBe("fatal");
+  });
+
+  it("keeps unattributed errors fatal", () => {
+    // An async FSWatcher error carries the path it was created with, which can
+    // be relative; unwatch() of a relative path would resolve against the cwd.
+    expect(classifyWatchError(error("UNKNOWN", { syscall: "watch", path: "relative/p" })))
+      .toBe("fatal");
+    expect(classifyWatchError(error("UNKNOWN", { syscall: "watch" }))).toBe("fatal");
+    expect(classifyWatchError(error("UNKNOWN", { syscall: "watch", path: "" }))).toBe("fatal");
+    expect(classifyWatchError(error(undefined, { syscall: "watch", path: "/p" }))).toBe("fatal");
+    expect(classifyWatchError(new Error("boom"))).toBe("fatal");
+    expect(classifyWatchError("boom")).toBe("fatal");
+    expect(classifyWatchError({ code: "UNKNOWN", syscall: "watch", path: "/p" })).toBe("fatal");
+  });
+});
+
+describe("path-scoped watch errors", () => {
+  it("warns about one unwatchable path and keeps reconciling", async () => {
+    const root = await tempRoot();
+    const project = await claudeOnlyController(root);
+    const poisoned = join(runtimeDir(root), "poisoned.md");
+    await writeFile(poisoned, "x");
+    // The exact error macOS gives for a socket, injected on a regular file the
+    // stats filter cannot skip: this exercises the error handler itself.
+    fs.watch = ((path: fs.PathLike, ...rest: unknown[]) => {
+      if (String(path) === poisoned) {
+        throw Object.assign(new Error(`UNKNOWN: unknown error, watch '${poisoned}'`), {
+          code: "UNKNOWN",
+          errno: -102,
+          syscall: "watch",
+          path: poisoned,
+        });
+      }
+      return (originalWatch as (...args: unknown[]) => fs.FSWatcher)(path, ...rest);
+    }) as typeof fs.watch;
+    syncBuiltinESMExports();
+
+    const run = runController(project);
+    await waitFor(() => run.results() >= 1 || run.errors.length > 0);
+    expect(run.errors).toEqual([]);
+    await writeFile(join(root, "CLAUDE.md"), "still watched\n");
+    await waitFor(() => run.results() >= 2);
+    run.abort.abort();
+    expect(await run.outcome).toBe("resolved");
+    expect(run.errors).toEqual([]);
+    expect(run.warnings).toContainEqual(
+      expect.objectContaining({ path: poisoned, code: "UNKNOWN" }),
+    );
+  });
+
+  it("a stream-terminating lstat error at startup fails the controller instead of hanging", async () => {
+    // An entry whose absolute path exceeds PATH_MAX makes readdirp's lstat fail
+    // with ENAMETOOLONG and destroys that directory's stream, so chokidar never
+    // emits "ready". Classifying it as path-scoped would wait forever.
+    const root = await tempRoot();
+    const project = await claudeOnlyController(root);
+    const base = runtimeDir(root);
+    const segment = "d".repeat(200);
+    let depth = 0;
+    while (base.length + depth * (segment.length + 1) < 1_100) depth += 1;
+    execFileSync("/bin/sh", [
+      "-c",
+      'cd "$1" && i=0 && while [ "$i" -lt "$2" ]; do mkdir "$3" && cd "$3" || exit 1; i=$((i+1)); done && : > leaf.txt',
+      "sh",
+      base,
+      String(depth),
+      segment,
+    ]);
+
+    const run = runController(project);
+    const settled = await Promise.race([
+      run.outcome,
+      sleep(4_000).then(() => "still pending after 4s"),
+    ]);
+    run.abort.abort();
+    expect(settled).toMatch(/^rejected: ENAMETOOLONG/u);
+    expect(await run.outcome).toMatch(/^rejected: ENAMETOOLONG/u);
+  }, 15_000);
+});

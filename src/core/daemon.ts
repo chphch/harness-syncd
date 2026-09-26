@@ -1,5 +1,5 @@
 import type { Stats } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
 import { getAdapter } from "../adapters/index.js";
 import { acquireLock, isGeneratedDirectory, readTextIfExists } from "./fs.js";
@@ -14,11 +14,23 @@ import { reconcileOnce, type ReconcileResult } from "./reconcile.js";
 export interface WatchOptions {
   onResult?: (result: ReconcileResult) => void;
   onError?: (error: Error) => void;
+  /**
+   * One path the watcher could not watch and now skips. The controller keeps
+   * running: the watcher only buys latency, and the audit tick still
+   * reconciles that path.
+   */
+  onWarning?: (warning: WatchWarning) => void;
   signal?: AbortSignal;
   /** The supervisor may hold all selected store locks before starting. */
   lock?: boolean;
   /** Stable config bytes captured by a fleet preflight. */
   expectedConfigSnapshot?: string;
+}
+
+export interface WatchWarning {
+  path: string;
+  code?: string;
+  message: string;
 }
 
 /**
@@ -49,6 +61,46 @@ export function isGeneratedWatchPath(candidate: string): boolean {
 export function isUnwatchableEntry(_candidate: string, stats?: Stats): boolean {
   if (stats === undefined) return false;
   return !stats.isFile() && !stats.isDirectory() && !stats.isSymbolicLink();
+}
+
+/**
+ * Error codes that can name one entry the watcher cannot watch. Resource
+ * exhaustion (EMFILE, ENFILE, ENOSPC) is deliberately absent: skipping paths
+ * then would silently shrink coverage, so it stays fatal to the controller.
+ */
+const PATH_SCOPED_WATCH_CODES = new Set([
+  "UNKNOWN",
+  "EOPNOTSUPP",
+  "ENOTSUP",
+  "ENXIO",
+  "ENODEV",
+  "EINVAL",
+  "ELOOP",
+  "ENAMETOOLONG",
+  "EACCES",
+  "EPERM",
+]);
+
+/** Only the syscalls chokidar issues against ONE entry it is about to watch. */
+const PATH_SCOPED_WATCH_SYSCALLS = new Set(["watch", "stat", "realpath"]);
+
+/**
+ * Whether a watcher error is confined to one path ("path": skip it and keep
+ * running) or means the watcher itself can no longer be trusted ("fatal").
+ *
+ * Everything not provably path-scoped is fatal. In particular readdirp's
+ * lstat/scandir errors destroy that directory's stream, so chokidar never
+ * finishes the directory and may never emit "ready": treating ENAMETOOLONG
+ * from lstat as skippable turned a startup failure into a silent hang. An
+ * async FSWatcher error carries the path it was created with, which may be
+ * relative, and unwatch() would resolve that against the process cwd.
+ */
+export function classifyWatchError(error: unknown): "path" | "fatal" {
+  if (!(error instanceof Error)) return "fatal";
+  const { code, path, syscall } = error as NodeJS.ErrnoException;
+  if (typeof path !== "string" || !isAbsolute(path)) return "fatal";
+  if (typeof syscall !== "string" || !PATH_SCOPED_WATCH_SYSCALLS.has(syscall)) return "fatal";
+  return typeof code === "string" && PATH_SCOPED_WATCH_CODES.has(code) ? "path" : "fatal";
 }
 
 export async function watchProject(
@@ -143,13 +195,26 @@ export async function watchProject(
       ],
     });
 
+    const liveWatcher = watcher;
     const fail = (error: unknown) => {
       const normalized = normalizeError(error);
       options.onError?.(normalized);
       stopping = true;
       settleStop?.(normalized);
     };
-    watcher.on("error", fail);
+    // One entry the watcher cannot watch must not stop the controller: the
+    // watcher is latency only (the audit tick reconciles regardless), so skip
+    // that path, say so, and keep going. unwatch() also stops chokidar from
+    // retrying it on every re-read of the parent directory.
+    watcher.on("error", (error: unknown) => {
+      if (classifyWatchError(error) === "path") {
+        const { path, code, message } = error as NodeJS.ErrnoException & { path: string };
+        liveWatcher.unwatch(path);
+        options.onWarning?.({ path, ...(code ? { code } : {}), message });
+        return;
+      }
+      fail(error);
+    });
 
     const schedule = () => {
       if (stopping) return;
@@ -196,8 +261,20 @@ export async function watchProject(
       schedule();
     });
     options.signal?.addEventListener("abort", onAbort, { once: true });
+    // An abort that landed during the awaits above fires no event.
+    if (options.signal?.aborted) onAbort();
 
-    await waitForReady(watcher);
+    // Raced against the stop signal: a startup that never becomes ready must
+    // still end when the supervisor aborts, or shutdown waits on it forever.
+    const ready = await Promise.race([
+      waitForReady(watcher).then(() => true),
+      stop.then(() => false),
+    ]);
+    if (!ready) {
+      const fatal = await stop;
+      if (fatal) throw fatal;
+      return;
+    }
     if ((await readTextIfExists(project.configPath)) !== initialConfig) {
       throw restartError(project.configPath, "changed during watch startup");
     }
@@ -245,6 +322,12 @@ export async function watchProject(
   }
 }
 
+/**
+ * Resolve on "ready", reject on the first FATAL watcher error. Path-scoped
+ * errors during the initial scan are the controller's error listener's to
+ * skip and report; `on`, not `once`, so a skipped path does not consume the
+ * listener and let a later fatal error go unnoticed until "ready".
+ */
 function waitForReady(watcher: FSWatcher): Promise<void> {
   return new Promise((resolvePromise, reject) => {
     const onReady = () => {
@@ -252,11 +335,13 @@ function waitForReady(watcher: FSWatcher): Promise<void> {
       resolvePromise();
     };
     const onError = (error: unknown) => {
+      if (classifyWatchError(error) === "path") return;
       watcher.off("ready", onReady);
+      watcher.off("error", onError);
       reject(normalizeError(error));
     };
     watcher.once("ready", onReady);
-    watcher.once("error", onError);
+    watcher.on("error", onError);
   });
 }
 
