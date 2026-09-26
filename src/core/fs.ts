@@ -149,13 +149,20 @@ export async function writeTextAtomic(path: string, value: string): Promise<void
   await mkdir(dirname(path), { recursive: true });
   const temp = join(dirname(path), `.${randomUUID()}.tmp`);
   const handle = await open(temp, "wx", 0o600);
+  // A failed write or rename must not leave the temp file behind: it lands in
+  // a directory the daemon watches, next to the path it was meant to replace.
   try {
-    await handle.writeFile(value, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
+    try {
+      await handle.writeFile(value, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temp, path);
+  } catch (error) {
+    await rm(temp, { force: true });
+    throw error;
   }
-  await rename(temp, path);
 }
 
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
@@ -351,8 +358,13 @@ async function assertSafeImportTree(root: string, current: string): Promise<void
 export async function copyFileAtomic(source: string, destination: string): Promise<void> {
   await mkdir(dirname(destination), { recursive: true });
   const temp = join(dirname(destination), `.${randomUUID()}.tmp`);
-  await copyFile(source, temp);
-  await rename(temp, destination);
+  try {
+    await copyFile(source, temp);
+    await rename(temp, destination);
+  } catch (error) {
+    await rm(temp, { force: true });
+    throw error;
+  }
 }
 
 export async function copyFileAtomicInside(
