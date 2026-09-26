@@ -157,6 +157,37 @@ describe("fleet health recorder", () => {
     });
   });
 
+  it("keeps one failure whose message differs only by a random temp name, without rewriting", async () => {
+    const root = await tempRoot();
+    const path = fleetHealthPath(join(root, "registry.yaml"));
+    let clock = Date.parse("2026-09-26T10:00:00.000Z");
+    const recorder = createFleetHealthRecorder(path, { now: () => new Date(clock) });
+    const base = { id: "alpha", configPath: "/p/alpha/harness-sync.yaml" };
+    const eacces = (uuid: string) => `EACCES: permission denied, open '/p/.claude/.${uuid}.tmp'`;
+    recorder.observe({ type: "started", ...base });
+    recorder.observe({
+      type: "error",
+      ...base,
+      error: eacces("3f1c2a9e-0b1d-4c55-9a8e-2b1f0c9d7e61"),
+      during: "sync",
+    });
+    await recorder.flush();
+    const first = await readHealth(path);
+
+    for (const uuid of ["a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d", "0f9e8d7c-6b5a-4938-8271-605f4e3d2c1b"]) {
+      clock += 30_000;
+      recorder.observe({ type: "error", ...base, error: eacces(uuid), during: "sync" });
+      await recorder.flush();
+    }
+    const later = await readHealth(path);
+    expect(later.updatedAt).toBe(first.updatedAt);
+    expect(later.controllers.alpha?.cycle).toEqual({
+      outcome: "error",
+      message: eacces("3f1c2a9e-0b1d-4c55-9a8e-2b1f0c9d7e61"),
+      since: "2026-09-26T10:00:00.000Z",
+    });
+  });
+
   it("reports a write failure once and keeps observing", async () => {
     const root = await tempRoot();
     // A directory where the file should go makes every write fail.

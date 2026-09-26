@@ -1,4 +1,8 @@
-import type { FleetExit, FleetHealthRecorder } from "./core/fleet-health.js";
+import {
+  problemKey,
+  type FleetExit,
+  type FleetHealthRecorder,
+} from "./core/fleet-health.js";
 import {
   watchAllControllers,
   type FleetWatchEvent,
@@ -90,8 +94,9 @@ export function createFleetNoticeWriter(
     const at = now().getTime();
     const current = problems.get(key);
     const [label, stillLabel] = PROBLEM_LABELS[`${channel} ${kind}`];
-    if (!current || current.kind !== kind || current.message !== message) {
-      problems.set(key, { kind, message, since: at, lastNotice: at });
+    // Compared without per-attempt temp names: see problemKey.
+    if (!current || current.kind !== kind || current.key !== problemKey(message)) {
+      problems.set(key, { kind, key: problemKey(message), since: at, lastNotice: at });
       line(`controller ${event.id} ${label}: ${oneLine(message)}`);
       return;
     }
@@ -166,7 +171,8 @@ export function createFleetNoticeWriter(
 
 interface Problem {
   kind: "conflict" | "error";
-  message: string;
+  /** problemKey of the message. */
+  key: string;
   since: number;
   lastNotice: number;
 }

@@ -199,16 +199,34 @@ function nextControllerHealth(
   }
 }
 
-/** Keep the original start time while the same problem repeats. */
+/**
+ * Keep the original problem — its start time and its first message — while
+ * the same problem repeats, so the file is not rewritten every cycle.
+ */
 function sameProblem(
   cycle: ControllerHealth["cycle"],
   outcome: "conflict" | "error",
   message: string,
   at: string,
 ): NonNullable<ControllerHealth["cycle"]> {
-  return cycle?.outcome === outcome && cycle.message === message
+  return cycle?.outcome === outcome && problemKey(cycle.message) === problemKey(message)
     ? cycle
     : { outcome, message, since: at };
+}
+
+/**
+ * A failure message with its per-attempt names blanked out, for telling one
+ * persisting problem from a new one. Every atomic write names its temp file
+ * `.<uuid>.tmp` (captures, projections and backups add a UUID or a timestamp
+ * too), so an unwritable target used to fail with a different message on
+ * every audit tick: a fresh stderr notice, a rewritten health file and a
+ * reset "since" every 30 seconds, which also hid how long it had been failing.
+ */
+export function problemKey(message: string): string {
+  return message
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/giu, "<uuid>")
+    .replace(/\d{4}-\d\d-\d\dT\d\d[-:]\d\d[-:]\d\d(?:\.\d+)?Z/gu, "<time>")
+    .replace(/(harness-sync-[a-z]+-)[A-Za-z0-9]{6}(?![A-Za-z0-9])/gu, "$1<tmp>");
 }
 
 export async function readFleetHealth(registryPath: string): Promise<FleetHealth | null> {

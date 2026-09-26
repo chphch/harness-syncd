@@ -189,6 +189,30 @@ describe("fleet notices on stderr", () => {
     ]);
   });
 
+  it("treats a failure whose message differs only by a random temp name as the same one", () => {
+    // Every atomic write names its temp file `.<uuid>.tmp`, so an unwritable
+    // target produced a "new" error on every 30 s audit tick.
+    const { lines, notice, advance } = collect();
+    const eacces = (uuid: string) =>
+      `EACCES: permission denied, open '/p/.claude/.${uuid}.tmp'`;
+    notice({ type: "error", ...base, error: eacces("3f1c2a9e-0b1d-4c55-9a8e-2b1f0c9d7e61"), during: "sync" });
+    advance(30_000);
+    notice({ type: "error", ...base, error: eacces("a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d"), during: "sync" });
+    advance(30_000);
+    notice({ type: "error", ...base, error: eacces("0f9e8d7c-6b5a-4938-8271-605f4e3d2c1b"), during: "sync" });
+    expect(lines).toEqual([
+      `${STAMP}controller alpha sync failed: EACCES: permission denied, open ` +
+        "'/p/.claude/.3f1c2a9e-0b1d-4c55-9a8e-2b1f0c9d7e61.tmp'\n",
+    ]);
+    advance(3_600_000);
+    notice({ type: "error", ...base, error: eacces("11111111-2222-4333-8444-555555555555"), during: "sync" });
+    expect(lines.at(-1)).toBe(
+      "2026-09-26T11:01:00.000Z harness-sync: controller alpha still failing to sync since " +
+        "2026-09-26T10:00:00.000Z: EACCES: permission denied, open " +
+        "'/p/.claude/.11111111-2222-4333-8444-555555555555.tmp'\n",
+    );
+  });
+
   it("formats backoff delays for people", () => {
     expect(formatDelay(50)).toBe("50ms");
     expect(formatDelay(1_500)).toBe("1.5s");
