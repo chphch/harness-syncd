@@ -4,9 +4,9 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadHarness, writeHarness } from "../src/core/config.js";
 import { migrateFrom } from "../src/core/migrate.js";
-import { initializeProject, type LoadedProject } from "../src/core/project.js";
-import { reconcileOnce } from "../src/core/reconcile.js";
-import { readState } from "../src/core/state.js";
+import { applyHarness, initializeProject, type LoadedProject } from "../src/core/project.js";
+import { establishBaseline, reconcileOnce } from "../src/core/reconcile.js";
+import { hashCanonical, readState } from "../src/core/state.js";
 import { refreshManagedTargetHashes } from "../src/core/writer.js";
 
 /**
@@ -279,6 +279,44 @@ describe("a canonical edit racing the capture commit", () => {
     expect(next.action).toBe("conflict");
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(EDIT);
     expect(await readFile(harnessYaml, "utf8")).toBe(`${stale}\n`);
+  });
+});
+
+describe("the takeover base across a rewritten-capture conflict", () => {
+  it("keeps the base, so the recommended apply --force keeps takeover-only values", async () => {
+    // A value that exists only in this machine's takeover base is merged into
+    // the native file by every projection. The rewritten-capture conflict
+    // leaves state and ledger untouched; it must leave the base too, or the
+    // `apply --force` its message recommends projects canonical without it.
+    const { project, settingsPath } = await fixture({ permissions: { allow: ["Read"] } }, "copy");
+    const base = join(project.storeDir, ".local", "preserved", "claude-settings.json");
+    await mkdir(dirname(base), { recursive: true });
+    await writeFile(base, JSON.stringify({ localOnly: "machine-value" }), "utf8");
+    const harness = await loadHarness(project.storeDir);
+    harness.metadata.description = "force a projection";
+    await writeHarness(project.storeDir, harness);
+    expect((await reconcileOnce(project)).action).toBe("projected-canonical");
+    expect(JSON.parse(await readFile(settingsPath, "utf8")).localOnly).toBe("machine-value");
+
+    const edited = JSON.parse(await readFile(settingsPath, "utf8"));
+    edited.permissions.allow.push("Bash(pnpm test)");
+    await writeFile(settingsPath, JSON.stringify(edited), "utf8");
+    const harnessYaml = join(project.storeDir, "harness.yaml");
+    const stale = await readFile(harnessYaml, "utf8");
+    hooks.afterClearLocalBase = () => writeFile(harnessYaml, `${stale}\n`, "utf8");
+
+    const first = await reconcileOnce(project);
+    expect(first.action).toBe("conflict");
+    expect(first.conflict?.message).toMatch(/harness\.yaml changed again/u);
+    expect(JSON.parse(await readFile(base, "utf8"))).toEqual({ localOnly: "machine-value" });
+
+    // What `harness-sync apply --force` does (cli.ts runApply).
+    const current = await loadHarness(project.storeDir);
+    const expected = await hashCanonical(project, current);
+    const results = await applyHarness(project, current, { dryRun: false, force: true });
+    expect(results.flatMap((result) => result.skipped)).toEqual([]);
+    await establishBaseline(project, current, "canonical", expected);
+    expect(JSON.parse(await readFile(settingsPath, "utf8")).localOnly).toBe("machine-value");
   });
 });
 

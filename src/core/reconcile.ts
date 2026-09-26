@@ -48,7 +48,11 @@ import {
 import { hashCanonical, nextState, readState, writeState } from "./state.js";
 import { validateHarness } from "./validate.js";
 import { parseFrontmatter } from "./frontmatter.js";
-import { clearPreservedLocalBase } from "./local-base.js";
+import {
+  clearPreservedLocalBase,
+  readPreservedLocalBase,
+  restorePreservedLocalBase,
+} from "./local-base.js";
 import {
   assertManagedTargetMatchesRegistry,
   assertManagedTargetStructure,
@@ -352,6 +356,7 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
     let captured: CaptureResult;
     let stagedContentHash: string;
     let installed: ReadonlyMap<string, string>;
+    let preservedBase: string | null;
     try {
       captured = await adapter.capture(
         harness,
@@ -421,6 +426,9 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
         );
       }
 
+      // Read before the commit clears it, so a capture that is then not
+      // adopted (the rewritten-path conflict below) can put it back.
+      preservedBase = await readPreservedLocalBase(project.storeDir, source);
       try {
         try {
           installed = await commitCaptureStage(
@@ -486,6 +494,11 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
     // stays in the source and the rewrite stays in canonical.
     const rewritten = canonicalIsCapture ? [] : await rewrittenCapturePaths(project.storeDir, installed);
     if (rewritten.length > 0) {
+      // Nothing of this capture is adopted, so neither is the removal of the
+      // takeover base that the commit made: without it, the `apply --force`
+      // this message recommends would project canonical minus every value
+      // that exists only on this machine.
+      await restorePreservedLocalBase(project.storeDir, source, preservedBase);
       return recordConflict(
         project,
         previous,
