@@ -24,6 +24,16 @@ export interface ControllerHealth {
   /** restarting: consecutive failures so far, and when the next try is due. */
   attempt?: number;
   retryAt?: string;
+  /**
+   * stopped: the failing state the controller was in when the fleet stopped.
+   * Without it an all-parked exit rewrote every parked controller as a plain
+   * "stopped", and the file no longer said that anything had failed, or why.
+   */
+  last?: {
+    state: "restarting" | "parked";
+    since: string;
+    error?: string;
+  };
   /** Present while the controller's latest reconciliation cycle did not succeed. */
   cycle?: {
     outcome: "conflict" | "error";
@@ -39,15 +49,27 @@ export interface FleetHealth {
   updatedAt: string;
   /** Set when the supervisor ended; its entries are history from then on. */
   stoppedAt?: string;
+  /** How the supervisor ended; written together with stoppedAt. */
+  exit?: FleetExit;
   controllers: Record<string, ControllerHealth>;
+}
+
+/** How `watch --all` ended. */
+export interface FleetExit {
+  /** The status the process exits with. */
+  code: number;
+  /** code 0: the signal that stopped it. */
+  signal?: string;
+  /** code other than 0: the error that ended it. */
+  error?: string;
 }
 
 export interface FleetHealthRecorder {
   observe(event: FleetWatchEvent): void;
   /** Resolves once every change observed so far is on disk (or failed). */
   flush(): Promise<void>;
-  /** Record the stop and flush. */
-  close(): Promise<void>;
+  /** Record the stop, and how the supervisor ended, and flush. */
+  close(exit?: FleetExit): Promise<void>;
 }
 
 /** `registry.yaml` → `registry.health.json`, beside it. */
@@ -114,9 +136,10 @@ export function createFleetHealthRecorder(
     async flush() {
       await writing;
     },
-    async close() {
+    async close(exit) {
       if (!observed) return;
       health.stoppedAt = now();
+      if (exit) health.exit = exit;
       schedule();
       await writing;
     },
@@ -145,8 +168,18 @@ function nextControllerHealth(
     case "parked":
       if (event.reminder) return current;
       return { state: "parked", since: event.since, error: event.error, ...keepCycle };
-    case "stopped":
-      return { state: "stopped", since: at, ...keepCycle };
+    case "stopped": {
+      // What it was doing when the fleet stopped: that failure is the last
+      // thing known about this store until a daemon runs it again.
+      const last = current?.state === "parked" || current?.state === "restarting"
+        ? {
+            state: current.state,
+            since: current.since,
+            ...(current.error === undefined ? {} : { error: current.error }),
+          }
+        : current?.last;
+      return { state: "stopped", since: at, ...(last ? { last } : {}), ...keepCycle };
+    }
     case "result": {
       const base = current ?? { state: "running" as const, since: at };
       if (event.result.action !== "conflict") {
@@ -212,7 +245,33 @@ export function fleetHealthIsLive(health: FleetHealth): boolean {
   }
 }
 
-/** The reason a live daemon's controller counts as degraded, if it does. */
+/**
+ * Why the fleet as a whole counts as degraded, if it does: its daemon is not
+ * running and either exited with a failure — every controller parked, a fatal
+ * control-watcher error — or ended without recording a stop at all, i.e. it
+ * was killed or crashed. A daemon stopped by a signal is not a problem by
+ * itself; its controllers' last recorded failures still are
+ * (controllerHealthProblem).
+ */
+export function fleetDaemonProblem(health: FleetHealth, live: boolean): string | null {
+  if (live) return null;
+  if (health.stoppedAt === undefined) {
+    return `harness-sync watch --all (pid ${health.pid}) ended without recording a stop: it was ` +
+      `killed or crashed after ${health.updatedAt}`;
+  }
+  if (health.exit !== undefined && health.exit.code !== 0) {
+    return `harness-sync watch --all exited with status ${health.exit.code} at ${health.stoppedAt}: ` +
+      (health.exit.error ?? "unknown error");
+  }
+  return null;
+}
+
+/**
+ * The reason a controller counts as degraded by what its daemon recorded, if
+ * it does. Once that daemon has stopped, its record is the last thing known
+ * about the store, so a failure the controller was in when the daemon stopped
+ * or crashed still counts until a daemon runs it again.
+ */
 export function controllerHealthProblem(health: ControllerHealth): string | null {
   if (health.state === "parked") {
     return `parked since ${health.since} (not retrying): ${health.error ?? "unknown error"}`;
@@ -220,6 +279,10 @@ export function controllerHealthProblem(health: ControllerHealth): string | null
   if (health.state === "restarting") {
     return `restarting (attempt ${health.attempt ?? "?"}, next try at ${health.retryAt ?? "?"}): ` +
       (health.error ?? "unknown error");
+  }
+  if (health.state === "stopped" && health.last) {
+    return `${health.last.state} since ${health.last.since} when the daemon stopped at ` +
+      `${health.since}: ${health.last.error ?? "unknown error"}`;
   }
   if (health.cycle?.outcome === "error") {
     return `reconciliation failing since ${health.cycle.since}: ${health.cycle.message}`;

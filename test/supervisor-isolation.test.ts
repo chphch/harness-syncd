@@ -2,12 +2,19 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { superviseFleet } from "../src/cli-fleet.js";
 import { writeProjectConfig } from "../src/core/config.js";
 import { watchProject } from "../src/core/daemon.js";
+import {
+  createFleetHealthRecorder,
+  fleetHealthPath,
+  readFleetHealth,
+} from "../src/core/fleet-health.js";
 import { pathExists } from "../src/core/fs.js";
 import { addController } from "../src/core/registry.js";
 import { initializeProject, type LoadedProject } from "../src/core/project.js";
 import {
+  statusAllControllers,
   watchAllControllers,
   type FleetWatchEvent,
   type RestartPolicy,
@@ -260,6 +267,57 @@ describe("fleet isolates a failing controller", () => {
     expect(settled).toMatch(/^rejected: every controller is parked.*first.*second/su);
     expect(await pathExists(join(first.storeDir, ".lock"))).toBe(false);
     expect(await pathExists(join(second.storeDir, ".lock"))).toBe(false);
+  });
+
+  it("leaves an all-parked exit visible to status --all after the process ended", async () => {
+    // The process exits 1 and the service manager respawns it, which parks
+    // again at once: for almost all of every cycle no daemon is running. The
+    // health file must still say what happened, and status --all must count it.
+    const root = await tempRoot();
+    const registryPath = join(root, "registry.yaml");
+    const first = await makeQuietController(join(root, "first"), "first");
+    const second = await makeQuietController(join(root, "second"), "second");
+    await addController(first.configPath, { registryPath });
+    await addController(second.configPath, { registryPath });
+    vi.mocked(watchProject).mockImplementation(async () => {
+      throw new TypeError("Cannot read properties of undefined (reading 'x')");
+    });
+
+    const health = createFleetHealthRecorder(fleetHealthPath(registryPath));
+    const outcome = await superviseFleet({
+      registryPath,
+      signal: new AbortController().signal,
+      health,
+      restartPolicy: fastPolicy,
+      onEvent: () => undefined,
+    }).then(() => "resolved", (error: Error) => `rejected: ${error.message}`);
+
+    expect(outcome).toMatch(/^rejected: every controller is parked/u);
+    const record = await readFleetHealth(registryPath);
+    expect(record?.exit).toEqual({
+      code: 1,
+      error: expect.stringMatching(/^every controller is parked/u),
+    });
+    for (const id of ["first", "second"]) {
+      expect(record?.controllers[id]).toMatchObject({
+        state: "stopped",
+        last: { state: "parked", error: "Cannot read properties of undefined (reading 'x')" },
+      });
+    }
+    const status = await statusAllControllers(registryPath);
+    expect(status.daemon).toMatchObject({
+      running: false,
+      problem: expect.stringMatching(/exited with status 1 .*every controller is parked/u),
+    });
+    expect(status.controllers.map((entry) => [entry.id, entry.status])).toEqual([
+      ["first", "error"],
+      ["second", "error"],
+    ]);
+    expect(status.controllers[0]).toMatchObject({
+      error: expect.stringMatching(/parked .*when the daemon stopped.*Cannot read properties/u),
+    });
+    // Both controllers, and the daemon itself.
+    expect(status.summary.degraded).toBe(3);
   });
 
   it("reports every controller stopped at shutdown, parked and backing off included", async () => {

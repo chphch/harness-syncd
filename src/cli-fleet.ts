@@ -1,4 +1,46 @@
-import type { FleetWatchEvent } from "./core/supervisor.js";
+import type { FleetExit, FleetHealthRecorder } from "./core/fleet-health.js";
+import {
+  watchAllControllers,
+  type FleetWatchEvent,
+  type RestartPolicy,
+} from "./core/supervisor.js";
+
+/**
+ * `watch --all` without the process plumbing: run the supervisor, feed every
+ * event to the health recorder, and record how the supervisor ended. The exit
+ * is what lets `status --all` tell a daemon that keeps failing — all parked,
+ * then respawned by the service manager, then parked again — from one that an
+ * operator stopped: for almost all of such a loop no daemon is running.
+ */
+export async function superviseFleet(options: {
+  registryPath: string;
+  signal: AbortSignal;
+  health: FleetHealthRecorder;
+  onEvent: (event: FleetWatchEvent) => void;
+  restartPolicy?: Partial<RestartPolicy>;
+}): Promise<void> {
+  let exit: FleetExit = { code: 1, error: "watch --all ended without an outcome" };
+  try {
+    await watchAllControllers({
+      registryPath: options.registryPath,
+      signal: options.signal,
+      ...(options.restartPolicy ? { restartPolicy: options.restartPolicy } : {}),
+      onEvent: (event) => {
+        options.health.observe(event);
+        options.onEvent(event);
+      },
+    });
+    const reason: unknown = options.signal.reason;
+    exit = options.signal.aborted && typeof reason === "string"
+      ? { code: 0, signal: reason }
+      : { code: 0 };
+  } catch (error) {
+    exit = { code: 1, error: error instanceof Error ? error.message : String(error) };
+    throw error;
+  } finally {
+    await options.health.close(exit);
+  }
+}
 
 export interface NoticeOptions {
   now?: () => Date;

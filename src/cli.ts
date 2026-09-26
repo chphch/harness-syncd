@@ -59,12 +59,11 @@ import { driftedManagedPaths } from "./core/writer.js";
 import { validateHarness } from "./core/validate.js";
 import { CARRY_STORE_PREFIX } from "./core/carry-entry.js";
 import { carrySummary, registerCarryCommands } from "./cli-carry.js";
-import { createFleetNoticeWriter, formatNotice } from "./cli-fleet.js";
+import { createFleetNoticeWriter, formatNotice, superviseFleet } from "./cli-fleet.js";
 import { createFleetHealthRecorder, fleetHealthPath } from "./core/fleet-health.js";
 import {
   statusAllControllers,
   syncAllControllers,
-  watchAllControllers,
   type FleetWatchEvent,
 } from "./core/supervisor.js";
 
@@ -417,21 +416,17 @@ program
                 "status --all will not see this daemon's controller states",
             )),
         });
-        try {
-          await watchAllControllers({
-            registryPath: registryPath(),
-            signal: signals.controller.signal,
-            onEvent: (event) => {
-              health.observe(event);
-              notice(event);
-              if (event.type !== "result" || event.result.action !== "noop") {
-                printFleetWatchEvent(event);
-              }
-            },
-          });
-        } finally {
-          await health.close();
-        }
+        await superviseFleet({
+          registryPath: registryPath(),
+          signal: signals.controller.signal,
+          health,
+          onEvent: (event) => {
+            notice(event);
+            if (event.type !== "result" || event.result.action !== "noop") {
+              printFleetWatchEvent(event);
+            }
+          },
+        });
       } else {
         const project = await loadProject(cwd());
         print({

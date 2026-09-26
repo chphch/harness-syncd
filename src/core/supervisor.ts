@@ -10,9 +10,11 @@ import {
 import { getGitStatus } from "./git.js";
 import {
   controllerHealthProblem,
+  fleetDaemonProblem,
   fleetHealthIsLive,
   readFleetHealth,
   type ControllerHealth,
+  type FleetExit,
 } from "./fleet-health.js";
 import {
   inspectControllers,
@@ -96,7 +98,10 @@ export interface ProjectStatusValue {
   state: Awaited<ReturnType<typeof readState>>;
   /** The unresolved conflict, if the last reconciliation ended in one. */
   conflict: SyncConflict | null;
-  /** What the running `watch --all` daemon reports for it, if one is running. */
+  /**
+   * What the `watch --all` daemon last recorded for it. `daemon.running` on
+   * the fleet result says whether that daemon is still running.
+   */
   daemon?: ControllerHealth;
   git: Awaited<ReturnType<typeof getGitStatus>>;
 }
@@ -110,6 +115,9 @@ export interface FleetStatusResult {
     startedAt?: string;
     updatedAt?: string;
     stoppedAt?: string;
+    exit?: FleetExit;
+    /** Why the daemon itself counts as degraded: it failed, or it crashed. */
+    problem?: string;
   };
   topologyError?: string;
   controllers: Array<ControllerOutcome<ProjectStatusValue>>;
@@ -401,6 +409,7 @@ export async function statusAllControllers(
   const listed = await inspectControllers(registry);
   const health = await readFleetHealth(absoluteRegistry);
   const daemonRunning = health !== null && fleetHealthIsLive(health);
+  const daemonProblem = health === null ? null : fleetDaemonProblem(health, daemonRunning);
   let topologyError: string | undefined;
   try {
     await validateControllerTopology(registry, { registryPath: absoluteRegistry });
@@ -437,7 +446,7 @@ export async function statusAllControllers(
             value: await buildProjectStatus(entry),
           };
         }
-        const daemon = daemonRunning ? health.controllers[entry.id] : undefined;
+        const daemon = health?.controllers[entry.id];
         const value = {
           ...(await buildProjectStatus(entry)),
           ...(daemon ? { daemon } : {}),
@@ -457,7 +466,9 @@ export async function statusAllControllers(
             id: entry.id,
             configPath: entry.config,
             status: "error",
-            error: problem,
+            error: daemonRunning
+              ? problem
+              : `${problem} (last recorded by watch --all pid ${health?.pid}, which is not running)`,
             value,
           };
         }
@@ -480,7 +491,7 @@ export async function statusAllControllers(
   const degraded = controllers.filter((entry, index) => {
     const registered = registry.controllers[index];
     return registered?.enabled === true && entry.status !== "ok";
-  }).length + (topologyError ? 1 : 0);
+  }).length + (topologyError ? 1 : 0) + (daemonProblem ? 1 : 0);
   return {
     registry: absoluteRegistry,
     daemon: health
@@ -490,6 +501,8 @@ export async function statusAllControllers(
           startedAt: health.startedAt,
           updatedAt: health.updatedAt,
           ...(health.stoppedAt ? { stoppedAt: health.stoppedAt } : {}),
+          ...(health.exit ? { exit: health.exit } : {}),
+          ...(daemonProblem ? { problem: daemonProblem } : {}),
         }
       : { running: false },
     ...(topologyError ? { topologyError } : {}),

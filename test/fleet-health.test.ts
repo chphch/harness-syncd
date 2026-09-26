@@ -144,8 +144,17 @@ describe("fleet health recorder", () => {
     // A reminder changes nothing, so nothing is rewritten.
     expect((await readHealth(path)).updatedAt).toBe(parked.updatedAt);
 
-    await recorder.close();
-    expect((await readHealth(path)).stoppedAt).toBe("2026-09-26T11:01:00.000Z");
+    // The failure it was in outlives the stop, together with how the stop came.
+    observe({ type: "stopped", ...base });
+    await recorder.close({ code: 1, error: "every controller is parked" });
+    const stopped = await readHealth(path);
+    expect(stopped.stoppedAt).toBe("2026-09-26T11:01:00.000Z");
+    expect(stopped.exit).toEqual({ code: 1, error: "every controller is parked" });
+    expect(stopped.controllers.alpha).toEqual({
+      state: "stopped",
+      since: "2026-09-26T11:01:00.000Z",
+      last: { state: "parked", since: "2026-09-26T10:01:30.000Z", error: "TypeError: x" },
+    });
   });
 
   it("reports a write failure once and keeps observing", async () => {
@@ -167,7 +176,7 @@ describe("fleet health recorder", () => {
   });
 });
 
-describe("status --all with a running daemon", () => {
+describe("status --all and the daemon's health", () => {
   async function fleetWithHealth(health: (pid: number) => Omit<FleetHealth, "pid">, pid: number) {
     const root = await tempRoot();
     const registryPath = join(root, "registry.yaml");
@@ -237,22 +246,61 @@ describe("status --all with a running daemon", () => {
       .toMatchObject({ status: "error", error: expect.stringMatching(/spawn EBADF/u) });
   });
 
-  it("ignores the health of a daemon that is no longer running", async () => {
+  it("reports a daemon that ended without recording a stop, and its controllers' last failures", async () => {
+    // Killed or crashed: nothing syncs, and the parked controller was never fixed.
     const registryPath = await fleetWithHealth(parkedFleet, await deadPid());
     const status = await statusAllControllers(registryPath);
 
-    expect(status.daemon.running).toBe(false);
+    expect(status.daemon).toMatchObject({
+      running: false,
+      problem: expect.stringMatching(/ended without recording a stop: it was killed or crashed/u),
+    });
+    expect(status.controllers.find((entry) => entry.id === "parked")).toMatchObject({
+      status: "error",
+      error: expect.stringMatching(/parked since .*TypeError: x \(last recorded by .*not running\)$/u),
+    });
+    expect(status.controllers.find((entry) => entry.id === "fine")?.status).toBe("ok");
+    expect(status.summary.degraded).toBe(2);
+  });
+
+  const stoppedFleet = (parkedAtStop: boolean): Omit<FleetHealth, "pid"> => ({
+    schemaVersion: 1,
+    startedAt: "2026-09-26T10:00:00.000Z",
+    updatedAt: "2026-09-26T10:06:00.000Z",
+    stoppedAt: "2026-09-26T10:06:00.000Z",
+    exit: { code: 0, signal: "SIGTERM" },
+    controllers: {
+      parked: {
+        state: "stopped",
+        since: "2026-09-26T10:06:00.000Z",
+        ...(parkedAtStop
+          ? { last: { state: "parked", since: "2026-09-26T10:05:00.000Z", error: "TypeError: x" } }
+          : {}),
+      },
+      fine: { state: "stopped", since: "2026-09-26T10:06:00.000Z" },
+    },
+  });
+
+  it("does not count a daemon stopped by a signal", async () => {
+    const registryPath = await fleetWithHealth(() => stoppedFleet(false), process.pid);
+    const status = await statusAllControllers(registryPath);
+
+    expect(status.daemon).toMatchObject({ running: false, exit: { code: 0, signal: "SIGTERM" } });
+    expect(status.daemon.problem).toBeUndefined();
     expect(status.summary.degraded).toBe(0);
   });
 
-  it("ignores the health of a daemon that recorded a clean stop", async () => {
-    const registryPath = await fleetWithHealth(
-      () => ({ ...parkedFleet(), stoppedAt: "2026-09-26T10:06:00.000Z" }),
-      process.pid,
-    );
+  it("still counts a controller that was parked when its daemon was stopped", async () => {
+    const registryPath = await fleetWithHealth(() => stoppedFleet(true), process.pid);
     const status = await statusAllControllers(registryPath);
 
-    expect(status.daemon.running).toBe(false);
-    expect(status.summary.degraded).toBe(0);
+    expect(status.daemon.problem).toBeUndefined();
+    expect(status.controllers.find((entry) => entry.id === "parked")).toMatchObject({
+      status: "error",
+      error: expect.stringMatching(
+        /^parked since 2026-09-26T10:05:00\.000Z when the daemon stopped at 2026-09-26T10:06:00\.000Z: TypeError: x/u,
+      ),
+    });
+    expect(status.summary.degraded).toBe(1);
   });
 });

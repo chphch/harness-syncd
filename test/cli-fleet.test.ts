@@ -284,6 +284,7 @@ describe("watch --all", () => {
     });
     const finalHealth = await readFleetHealth(registryPath);
     expect(finalHealth?.stoppedAt).toEqual(expect.any(String));
+    expect(finalHealth?.exit).toEqual({ code: 0, signal: "SIGTERM" });
   }, 30_000);
 
   it("writes a persistent conflict to stderr once, and status --all reports it", async () => {
