@@ -53,6 +53,7 @@ import {
   assertManagedTargetMatchesRegistry,
   assertManagedTargetStructure,
   changedManagedPathsForTarget,
+  hashManagedTargetFiles,
   managedPathsForTarget,
   refreshManagedTargetHashes,
 } from "./writer.js";
@@ -202,6 +203,13 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
         "Canonical content changed before inverse capture began; no native content was adopted",
       );
     }
+    // Taken while the source is held to sourceHashBeforeCapture: the
+    // fingerprint is re-checked after the semantic check and after the
+    // capture, so these are the hashes of exactly the content this cycle
+    // adopts. The ledger records THESE, never a later re-read (see below).
+    const sourcePathHashes = await hashManagedTargetFiles(project.storeDir, source);
+    // The state half of that pairing: the fingerprint of the same content.
+    const capturedSource = { [source]: sourceHashBeforeCapture };
 
     const controllerHash = await hashPath(project.configPath);
     const semanticStageDir = await createCaptureStage(project.storeDir, harness);
@@ -248,29 +256,33 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
           `${source} changed after semantic verification; ownership hashes were not refreshed`,
         );
       }
-      await refreshManagedTargetHashes(project.storeDir, source);
-      const sourceHashAfterRefresh = await adapter.fingerprint(
-        adapterContext(project, source),
-      );
-      if (sourceHashAfterRefresh !== sourceHashBeforeCapture) {
-        return recordConflict(
-          project,
-          previous,
-          false,
-          changedTargets,
-          `${source} changed while ownership hashes were refreshed; state was not advanced`,
-        );
-      }
+      // From here the ledger records the verified content, so every exit
+      // must persist a state pairing it with that content's fingerprint. A
+      // ledger ahead of the state reads, next cycle, as a changed target with
+      // no changed path: a permanent "concurrent edits" conflict. An edit that
+      // lands after this point is not adopted: the ledger still differs from
+      // it, so the next cycle sees it.
+      await refreshManagedTargetHashes(project.storeDir, source, sourcePathHashes);
       if (
         (await hashCanonical(project, harness)) !== canonicalHash ||
         (await hashPath(project.configPath)) !== controllerHash
       ) {
+        // The previous canonical hash keeps the concurrent canonical edit
+        // visible, so the next cycle projects it (or reports a conflict if
+        // the source moved too) instead of it being absorbed here.
+        const paired = nextState(
+          previous,
+          previous.canonicalHash,
+          { ...previous.targetHashes, ...capturedSource },
+          source,
+        );
+        await writeState(project.storeDir, paired);
         return recordConflict(
           project,
-          previous,
+          paired,
           true,
           changedTargets,
-          "Canonical configuration changed while ownership hashes were refreshed; state was not advanced",
+          "Canonical configuration changed while ownership hashes were refreshed; the next reconcile projects it",
         );
       }
       await clearPreservedLocalBase(project.storeDir, source);
@@ -280,17 +292,21 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
         previous,
         source,
         canonicalHash,
+        capturedSource,
       );
       return {
         action: "captured-native",
         changedTargets,
         applyResults: [],
-        warnings: [{
-          code: "native-formatting-only",
-          message:
-            `${source} was semantically unchanged (format/key order or removal of takeover-only local values); ownership hashes were refreshed without rewriting canonical content`,
-          fidelity: "compatible",
-        }],
+        warnings: [
+          {
+            code: "native-formatting-only",
+            message:
+              `${source} was semantically unchanged (format/key order or removal of takeover-only local values); ownership hashes were refreshed without rewriting canonical content`,
+            fidelity: "compatible",
+          },
+          ...(await changedAfterCaptureWarnings(project, source, sourceHashBeforeCapture)),
+        ],
         state,
       };
     }
@@ -298,6 +314,7 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
     const originalContentHash = await hashCanonicalContent(project.storeDir, harness);
     const stageDir = await createCaptureStage(project.storeDir, harness);
     let captured: CaptureResult;
+    let stagedContentHash: string;
     try {
       captured = await adapter.capture(
         harness,
@@ -340,10 +357,8 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
           "Canonical content changed while native content was being captured; staged data was discarded",
         );
       }
-      if (
-        (await hashCanonicalContent(stageDir, captured.harness)) ===
-        originalContentHash
-      ) {
+      stagedContentHash = await hashCanonicalContent(stageDir, captured.harness);
+      if (stagedContentHash === originalContentHash) {
         return recordConflict(
           project,
           previous,
@@ -392,58 +407,46 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
       await rm(stageDir, { recursive: true, force: true });
     }
 
-    if ((await hashPath(project.configPath)) !== controllerHash) {
-      return recordConflict(
-        project,
-        previous,
-        true,
-        changedTargets,
-        "Controller configuration changed during inverse capture; state was not advanced",
-      );
-    }
-
+    // The capture is committed: canonical now holds what `source` contained
+    // when it was captured. Every exit from here on must leave .state.json
+    // agreeing with that. The old code refused to advance state whenever the
+    // source or a managed output moved before the final snapshot, which left
+    // canonical ahead of state for good: every later cycle saw canonical AND
+    // native changed and recorded "concurrent edits". On 2026-09-16 a session
+    // editing one hook mid-capture stopped the user store that way for ten
+    // days.
+    //
+    // So the ledger records the captured hashes, and a checkpoint pairs the
+    // committed canonical revision with the source fingerprint of that same
+    // content. Whatever the source holds by now then reads next cycle as a
+    // native-only change and is captured; nothing newer is adopted unseen.
+    // The other targets are left out of the checkpoint, so a cycle that stops
+    // before projecting them re-projects them as new targets.
+    await refreshManagedTargetHashes(project.storeDir, source, sourcePathHashes);
     const capturedCanonicalHash = await hashCanonical(project, harness);
-    if ((await hashPath(project.configPath)) !== controllerHash) {
-      return recordConflict(
-        project,
-        previous,
-        true,
-        changedTargets,
-        "Controller configuration changed while the canonical revision was hashed; state was not advanced",
-      );
-    }
-    const sourceHashBeforeRefresh = await adapter.fingerprint(
-      adapterContext(project, source),
+    // Checked AFTER hashing: the controller config and the store content both
+    // still being exactly what was committed proves the hash does not include
+    // an edit that landed after the commit. Absorbed into the checkpoint, such
+    // an edit would never be projected to the capture source.
+    const canonicalIsCapture =
+      (await hashPath(project.configPath)) === controllerHash &&
+      (await hashCanonicalContent(project.storeDir, harness)) === stagedContentHash;
+    const checkpoint = nextState(
+      previous,
+      // Otherwise keep the previous hash, so the next cycle sees canonical as
+      // changed and projects the capture together with that edit.
+      canonicalIsCapture ? capturedCanonicalHash : previous.canonicalHash,
+      capturedSource,
+      source,
     );
-    if (sourceHashBeforeRefresh !== sourceHashBeforeCapture) {
+    await writeState(project.storeDir, checkpoint);
+    if (!canonicalIsCapture) {
       return recordConflict(
         project,
-        previous,
+        checkpoint,
         true,
         changedTargets,
-        `${source} changed after capture; canonical changes were retained but state was not advanced`,
-      );
-    }
-    await refreshManagedTargetHashes(project.storeDir, source);
-    const sourceHashAfterRefresh = await adapter.fingerprint(
-      adapterContext(project, source),
-    );
-    if (sourceHashAfterRefresh !== sourceHashBeforeCapture) {
-      return recordConflict(
-        project,
-        previous,
-        true,
-        changedTargets,
-        `${source} changed while ownership hashes were refreshed; state was not advanced`,
-      );
-    }
-    if ((await hashPath(project.configPath)) !== controllerHash) {
-      return recordConflict(
-        project,
-        previous,
-        true,
-        changedTargets,
-        "Controller configuration changed before target projection; state was not advanced",
+        "Canonical configuration changed during inverse capture; the capture was kept and the next reconcile projects both",
       );
     }
     const applyResults = await applyHarness(project, harness, {
@@ -455,15 +458,20 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
     const state = await snapshotState(
       project,
       harness,
-      previous,
+      checkpoint,
       source,
       capturedCanonicalHash,
+      capturedSource,
     );
     return {
       action: "captured-native",
       changedTargets,
       applyResults,
-      warnings: [...captured.warnings, ...flattenWarnings(applyResults)],
+      warnings: [
+        ...captured.warnings,
+        ...flattenWarnings(applyResults),
+        ...(await changedAfterCaptureWarnings(project, source, sourceHashBeforeCapture)),
+      ],
       state,
     };
   }
@@ -968,25 +976,35 @@ export async function establishBaseline(
   );
 }
 
+/**
+ * Verify the projection and persist the resulting state. `pinned` targets are
+ * recorded with the given fingerprint instead of being verified and
+ * re-measured: an inverse capture pins its source to the fingerprint of the
+ * content it captured, which the ledger records too, so a source that has
+ * already moved on is seen — and captured — by the next cycle rather than
+ * failing this snapshot.
+ */
 async function snapshotState(
   project: LoadedProject,
   harness: CanonicalHarness,
   previous: ProjectionState | null,
   lastWriter: "canonical" | TargetName,
   expectedCanonicalHash: string,
+  pinned: Partial<Record<TargetName, string>> = {},
 ): Promise<ProjectionState> {
-  await assertProjectionStable(project, harness, expectedCanonicalHash);
-  const targetHashes = await fingerprintTargets(project);
+  const measured = enabledTargets(project).filter((target) => !(target in pinned));
+  await assertProjectionStable(project, harness, expectedCanonicalHash, measured);
+  const targetHashes = await fingerprintTargets(project, measured);
   await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
-  await assertProjectionStable(project, harness, expectedCanonicalHash);
-  const verifiedTargetHashes = await fingerprintTargets(project);
+  await assertProjectionStable(project, harness, expectedCanonicalHash, measured);
+  const verifiedTargetHashes = await fingerprintTargets(project, measured);
   if (JSON.stringify(targetHashes) !== JSON.stringify(verifiedTargetHashes)) {
     throw new Error("native targets changed while the reconciliation snapshot was being created");
   }
   const state = nextState(
     previous,
     expectedCanonicalHash,
-    verifiedTargetHashes,
+    { ...verifiedTargetHashes, ...pinned },
     lastWriter,
   );
   await writeState(project.storeDir, state);
@@ -997,13 +1015,14 @@ async function assertProjectionStable(
   project: LoadedProject,
   harness: CanonicalHarness,
   expectedCanonicalHash: string,
+  targets: readonly TargetName[] = enabledTargets(project),
 ): Promise<void> {
   const actualCanonicalHash = await hashCanonical(project, harness);
   if (actualCanonicalHash !== expectedCanonicalHash) {
     throw new Error("canonical store changed while projection was in progress; state was not advanced");
   }
   await Promise.all(
-    enabledTargets(project).map((target) =>
+    targets.map((target) =>
       assertManagedTargetMatchesRegistry(project.storeDir, target),
     ),
   );
@@ -1011,14 +1030,31 @@ async function assertProjectionStable(
 
 async function fingerprintTargets(
   project: LoadedProject,
+  targets: readonly TargetName[] = enabledTargets(project),
 ): Promise<Partial<Record<TargetName, string>>> {
   const entries = await Promise.all(
-    enabledTargets(project).map(async (target) => [
+    targets.map(async (target) => [
       target,
       await getAdapter(target).fingerprint(adapterContext(project, target)),
     ] as const),
   );
   return Object.fromEntries(entries);
+}
+
+/** Say so when the source already holds a newer edit than the one captured. */
+async function changedAfterCaptureWarnings(
+  project: LoadedProject,
+  source: TargetName,
+  capturedFingerprint: string,
+): Promise<AdapterWarning[]> {
+  const current = await getAdapter(source).fingerprint(adapterContext(project, source));
+  if (current === capturedFingerprint) return [];
+  return [{
+    code: "native-changed-after-capture",
+    message:
+      `${source} changed again after it was captured; the next reconcile captures the newer edit`,
+    fidelity: "compatible",
+  }];
 }
 
 function flattenWarnings(results: ApplyResult[]): AdapterWarning[] {

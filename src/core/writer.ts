@@ -855,14 +855,43 @@ export async function assertManagedTargetStructure(
   }
 }
 
+/**
+ * Hash every materialized path `target` owns, as it is on disk now. An inverse
+ * capture takes this while it holds the source steady, so the result describes
+ * exactly the content that was captured.
+ */
+export async function hashManagedTargetFiles(
+  storeDir: string,
+  target: TargetName,
+): Promise<Map<string, string>> {
+  const registry = await readManagedRegistry(storeDir);
+  const hashes = new Map<string, string>();
+  if (!registry) return hashes;
+  for (const path of ownedPaths(registry, target)) {
+    if (path in registry.files) hashes.set(path, await hashPath(path));
+  }
+  return hashes;
+}
+
+/**
+ * Record `target`'s materialized paths as in sync with canonical. Pass
+ * `observed` (from hashManagedTargetFiles) to record the content that was
+ * actually captured or verified: re-reading the files here would adopt an
+ * edit that landed after the capture as if it were harness-sync's own
+ * output, so that edit would never be captured and the ledger and state
+ * would disagree for good.
+ */
 export async function refreshManagedTargetHashes(
   storeDir: string,
   target: TargetName,
+  observed?: ReadonlyMap<string, string>,
 ): Promise<void> {
   const registry = await readManagedRegistry(storeDir);
   if (!registry) return;
   for (const path of ownedPaths(registry, target)) {
-    if (path in registry.files) registry.files[path] = await hashPath(path);
+    if (path in registry.files) {
+      registry.files[path] = observed?.get(path) ?? await hashPath(path);
+    }
   }
   await writeJsonAtomicInside(
     storeDir,
