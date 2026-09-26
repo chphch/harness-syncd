@@ -150,7 +150,21 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
         ? {}
         : { exclude: targets.filter((target) => !newTargets.includes(target)) }),
     });
-    assertNoSkippedWrites(applyResults, "Canonical projection");
+    const skipped = skippedWrites(applyResults);
+    if (skipped.paths.length > 0) {
+      // Canonical and native both changed at these paths (or the native path
+      // was never harness-sync's): a conflict, recorded as one so status and
+      // the conflict record show it, instead of an error on every cycle.
+      return recordConflict(
+        project,
+        previous,
+        canonicalChanged,
+        skipped.targets,
+        `Canonical projection left native paths of ${skipped.targets.join(", ")} untouched because they are ` +
+          `unmanaged or were changed outside harness-sync; state was not advanced: ${skipped.paths.join(", ")}. ` +
+          SKIPPED_WRITES_RESOLUTION,
+      );
+    }
     const state = await snapshotState(project, harness, previous, "canonical", canonicalHash);
     return {
       action: "projected-canonical",
@@ -503,7 +517,22 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
       force: false,
       exclude: [source],
     });
-    assertNoSkippedWrites(applyResults, `Projection after capturing ${source}`);
+    const skipped = skippedWrites(applyResults);
+    if (skipped.paths.length > 0) {
+      // Another target was edited while this capture ran: two targets edited
+      // at once, which is a conflict by design. The checkpoint above already
+      // holds the capture, and the targets left out of it are re-projected —
+      // and so re-reported here — until this is resolved.
+      return recordConflict(
+        project,
+        checkpoint,
+        true,
+        skipped.targets,
+        `${source} was captured, but projecting it left native paths of ${skipped.targets.join(", ")} untouched ` +
+          `because they are unmanaged or were changed outside harness-sync: ${skipped.paths.join(", ")}. ` +
+          SKIPPED_WRITES_RESOLUTION,
+      );
+    }
     const state = await snapshotState(
       project,
       harness,
@@ -1155,6 +1184,18 @@ async function changedAfterCaptureWarnings(
 
 function flattenWarnings(results: ApplyResult[]): AdapterWarning[] {
   return results.flatMap((result) => result.warnings);
+}
+
+const SKIPPED_WRITES_RESOLUTION =
+  "Resolve with an explicit migration of that target (keeps the native edit) or `harness-sync apply --force` " +
+  "(keeps canonical, with a backup of the native file)";
+
+/** The targets and native paths a projection refused to overwrite. */
+function skippedWrites(results: ApplyResult[]): { targets: TargetName[]; paths: string[] } {
+  return {
+    targets: results.filter((result) => result.skipped.length > 0).map((result) => result.target),
+    paths: [...new Set(results.flatMap((result) => result.skipped))].sort(),
+  };
 }
 
 function assertNoSkippedWrites(results: ApplyResult[], action: string): void {

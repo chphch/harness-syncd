@@ -282,6 +282,66 @@ describe("a canonical edit racing the capture commit", () => {
   });
 });
 
+describe("another target edited while a capture is projected", () => {
+  // Two different targets edited at once is a multi-target conflict by design;
+  // what must not happen is an error on every cycle with no conflict record,
+  // or either edit being overwritten.
+  const cycle = async (project: LoadedProject) =>
+    reconcileOnce(project).then(
+      (result) => `${result.action}${result.conflict ? `: ${result.conflict.message}` : ""}`,
+      (error: Error) => `threw: ${error.message}`,
+    );
+
+  it("records a conflict naming a Codex file edited during the capture", async () => {
+    const { project, settingsPath } = await fixture({ permissions: { allow: ["Read"] } }, "copy");
+    const agents = join(project.projectRoot, "AGENTS.md");
+    await writeFile(settingsPath, JSON.stringify(EDIT), "utf8");
+    hooks.afterClearLocalBase = () => writeFile(agents, "Edited in Codex\n", "utf8");
+
+    const log = [await cycle(project), await cycle(project), await cycle(project)];
+
+    for (const entry of log) expect(entry).toMatch(/^conflict: .*AGENTS\.md/u);
+    expect(await readFile(agents, "utf8")).toBe("Edited in Codex\n");
+    expect(await allowList(project)).toContain("Bash(pnpm test)");
+    expect(await readFile(join(project.storeDir, "instructions", "root.md"), "utf8"))
+      .toBe("Instructions\n");
+  });
+
+  it("settles into a conflict when a Codex skill copy changes before the snapshot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-sync-other-target-"));
+    roots.push(root);
+    const skill = join(root, ".claude", "skills", "demo");
+    await mkdir(skill, { recursive: true });
+    await writeFile(join(root, "CLAUDE.md"), "Instructions\n", "utf8");
+    await writeFile(join(skill, "SKILL.md"), "---\nname: demo\ndescription: Demo\n---\nv1\n");
+    const settingsPath = join(root, ".claude", "settings.json");
+    await writeFile(settingsPath, JSON.stringify({ permissions: { allow: ["Read"] } }), "utf8");
+    const project = await initializeProject(root);
+    project.config.sync.linkMode = "copy";
+    await migrateFrom(project, "claude", {
+      apply: true,
+      install: true,
+      includeLocal: false,
+      force: true,
+      excludeSkills: [],
+    });
+    expect((await reconcileOnce(project)).action).toBe("noop");
+    const codexSkill = join(root, ".agents", "skills", "demo", "SKILL.md");
+    const codexEdit = "---\nname: demo\ndescription: Demo\n---\nv2 from Codex\n";
+    await writeFile(settingsPath, JSON.stringify(EDIT), "utf8");
+    hooks.afterApply = () => writeFile(codexSkill, codexEdit);
+
+    await cycle(project);
+    const later = [await cycle(project), await cycle(project)];
+
+    for (const entry of later) expect(entry).toMatch(/^conflict: .*\.agents\/skills\/demo/u);
+    expect(await readFile(codexSkill, "utf8")).toBe(codexEdit);
+    expect(await readFile(join(project.storeDir, "skills", "demo", "SKILL.md"), "utf8"))
+      .toContain("v1");
+    expect(await allowList(project)).toContain("Bash(pnpm test)");
+  });
+});
+
 describe("a native edit racing a semantic no-op", () => {
   it("keeps the ledger and state paired when the snapshot then fails", async () => {
     const settings = { permissions: { deny: ["Write"], allow: ["Read"] } };
