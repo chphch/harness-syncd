@@ -92,15 +92,35 @@ harness-sync watch --all
 
 `watch --all` selects controllers whose `enabled` and `watch` flags are both true. It uses the same topology preflight and all-lock barrier, runs the individual reconciliation loops under one abort signal, and watches the registry plus every enabled controller config. A control-file change — the registry, or any enabled controller's config — stops the whole fleet and returns a restart-required error. This fail-closed restart model avoids partially applying a changed topology; dynamic hot reload is intentionally not part of v0.2.
 
+A controller config that is invalid or missing when the fleet starts is not a controller failure either: planning fails for the whole fleet and the command exits 1 before any controller starts, so no store runs under a half-valid topology. Under a service manager that restarts on failure this repeats at the manager's throttle interval until the config is fixed or the controller is disabled with `manage set <id> --enabled false`.
+
 Every other failure stays inside the controller it happens in, and the rest of the fleet keeps syncing:
 
-- **A watch error on one path** — an entry the watcher cannot watch, such as a permission error on a single file — is reported as a `warning` event and that path is skipped. The watcher only buys latency: the periodic audit (`sync.auditIntervalMs`) still reconciles the skipped path. Unix sockets, FIFOs and devices are never watched at all; a socket used to raise such an error and a FIFO used to hang the process. Directory-read errors and descriptor exhaustion (`EMFILE`, `ENFILE`, `ENOSPC`) are not path-scoped: they fail the controller as below.
-- **A failure with an errno code** (`EMFILE`, `ENOSPC`, `UNKNOWN`, ...) is treated as environmental: that controller alone restarts after a backoff that starts at 10 s, doubles per consecutive failure up to 10 min, and resets after a run of 10 min. Each attempt emits a `restarting` event with the attempt number and delay.
-- **A failure without an errno code** is a programming error or an invalid controller, which retrying cannot fix. That controller is `parked`: it stays stopped for inspection, still holding its store lock, until the daemon is restarted after the fix.
+- **A watch error on one path** — an entry the watcher cannot watch, such as a permission error on a single file — is reported as a `warning` event and that path is skipped for the life of the process. The watcher only buys latency: the periodic audit (`sync.auditIntervalMs`) still reconciles the skipped path. Unix sockets, FIFOs and devices are skipped when the watcher discovers them; a socket used to raise such an error and a FIFO used to hang the process. One gap remains in chokidar 5.0.0: when a file that is already being watched is replaced by a FIFO under the same name (a rename over it), chokidar re-watches it without consulting the skip rule, and opening the FIFO blocks the whole daemon until something writes to it. Directory-read errors and descriptor exhaustion (`EMFILE`, `ENFILE`, `ENOSPC`) are not path-scoped: they fail the controller as below.
+- **A failure with an errno code** (`EMFILE`, `ENOSPC`, `UNKNOWN`, ...) is treated as environmental: that controller alone restarts after a backoff that starts at 10 s, doubles per consecutive failure up to 10 min, and resets after a run of 10 min. Each attempt emits a `restarting` event with the attempt number and delay. A failure that never clears is retried every 10 min indefinitely.
+- **A failure without an errno code** is a programming error, which retrying cannot fix. That controller is `parked`: it stays stopped, still holding its store lock (so a manual `sync` of that store is refused), and the `parked` event is repeated every hour with `reminder: true` until the daemon is restarted after the fix. When every controller is parked nothing is syncing, so the process exits 1 instead of idling.
+- **A conflict or failure inside a reconciliation cycle** — the store is not stopped by it; the next cycle retries. It is reported as a `result` with `action: "conflict"` (and in `conflicts/current.json`) or as an `error` event with `during: "sync"`.
 
-`restarting` and `parked` events, and the first `warning` per controller and path, are also written to stderr as one human-readable line each, for example `harness-sync: controller web-app-4f19a27c restarting in 10s (attempt 1): EMFILE: too many open files, watch '…'`. stdout keeps the JSON event stream, including these event types.
+Each stderr notice is one line starting with an ISO-8601 time (a parked controller's stack frames follow it, indented). The daemon writes one when:
 
-`status --all` includes disabled, missing, and invalid entries. Exit status 2 means an enabled controller or the fleet topology is degraded. `sync --all` uses exit status 2 for reconciliation conflicts and 1 for operational errors.
+- a controller restarts or is parked (the first park notice includes the stack; a reminder follows hourly);
+- a path is skipped, once per controller and path;
+- a controller's cycles start to conflict or fail, or change to a different conflict or error — repeated hourly while it persists, with a closing line when a cycle succeeds again; a failed Git backup is reported the same way;
+- the process stops: the fatal error, or `stopped by SIGTERM; exiting with status 0` on a signal.
+
+stdout keeps the event stream, one JSON object per line with the global `--json` flag; noop results are left out. Every event carries `at`, `controller` and `config`:
+
+| `type` | Extra fields | Meaning |
+|---|---|---|
+| `started` | — | A watch loop for the controller is starting (again after each restart). |
+| `result` | `result` | One reconciliation cycle finished; `result.action` is `conflict` when it did not apply. |
+| `error` | `error`, `during` | `sync`: one cycle failed. `backup`: a Git backup failed. `watch`: the watch loop is stopping; `restarting`, `parked` or a fleet stop follows. |
+| `warning` | `path`, `code`, `warning` | The watcher skips this path; the audit still reconciles it. |
+| `restarting` | `error`, `attempt`, `delayMs` | Environmental failure; the controller restarts after `delayMs`. |
+| `parked` | `error`, `since`, `stack` (first only), `reminder` (repeats) | Not retried until the daemon restarts. |
+| `stopped` | — | Sent exactly once per controller when the fleet stops, whether it was running, parked or waiting to restart. |
+
+`status --all` includes disabled, missing, and invalid entries. Exit status 2 means an enabled controller or the fleet topology is degraded. A controller counts as degraded when its config is missing or invalid, when it has an unresolved conflict (`conflicts/current.json`, which the first cycle that no longer conflicts removes), and — while a `watch --all` daemon for the registry is running — when that daemon reports it parked, waiting to restart, or failing every cycle. The daemon keeps that report in `<registry name>.health.json` beside the registry (for the default registry, `~/.config/harness-sync/registry.health.json`), rewriting it only when a controller's state changes; `status --all` shows whether the daemon is running and ignores the file once the daemon has stopped. `sync --all` uses exit status 2 for reconciliation conflicts and 1 for operational errors.
 
 `-C/--cwd` cannot be combined with `--all`: fleet membership comes only from the registry.
 
@@ -116,7 +136,9 @@ Disabling or removing an entry changes only the machine registry. It does not de
 
 Run one `watch --all` supervisor per registry. Store locks prevent a second managed writer from operating on the same canonical store, but separate unregistered processes with disjoint store locks cannot know about each other's registry-wide path claims.
 
-For a login service, run the foreground command under the OS service manager and let that manager restart it after a control-file change or another fleet-level failure. A failing controller no longer ends the process: it is restarted in-process or parked, so watch the daemon's stderr (or the `parked` events) rather than its exit status to notice one. Do not configure immediate unlimited restart loops: a persistently invalid registry or controller should remain stopped for inspection.
+For a login service, run the foreground command under the OS service manager with restart on failure. The command exits 1 on a control-file change and on every fleet-level failure — an invalid or missing controller config, a topology error, a store lock another process holds, a failed control watcher, or every controller parked — so the manager starts it again against a fresh plan. A single failing controller does not end the process: it is restarted in-process or parked. To notice one, read the daemon's stderr or run `status --all` (exit 2 when degraded); the exit status alone will not show it.
+
+A signal is the only way the command exits 0, and it says so on stderr. A manager that restarts only on failure — launchd `KeepAlive` with `SuccessfulExit` false, systemd `Restart=on-failure` — therefore does not relaunch a daemon stopped with a plain `kill`. Restart it through the manager instead: `launchctl kickstart -k gui/$(id -u)/<label>` or `systemctl --user restart <unit>`. A persistently invalid config makes the manager restart the daemon at its throttle interval (launchd `ThrottleInterval`, default 10 s; systemd `RestartSec`), writing one error line each time; choose an interval you are willing to see repeated until the config is fixed.
 
 ## Private Git synchronization
 
