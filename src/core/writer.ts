@@ -262,9 +262,13 @@ export class ManagedWriter {
     this.written.push(path);
     if (this.options.dryRun) return true;
     const prepared = this.preparedPath(path);
-    await writeTextAtomic(prepared, value);
-    const intended = await hashPath(prepared);
+    let intended: string;
+    // Creating and hashing the staging copy sit inside the try: a failure
+    // there (EMFILE, ENOSPC) must not leave a `.prepared` entry in a watched
+    // native root.
     try {
+      await writeTextAtomic(prepared, value);
+      intended = await hashPath(prepared);
       if (observed !== null) await this.backup(path, observed);
       await this.installPreparedFile(prepared, path);
     } finally {
@@ -328,9 +332,10 @@ export class ManagedWriter {
     this.written.push(destination);
     if (this.options.dryRun) return true;
     const prepared = this.preparedPath(destination);
-    await copyFileAtomic(source, prepared);
-    const intended = await hashPath(prepared);
+    let intended: string;
     try {
+      await copyFileAtomic(source, prepared);
+      intended = await hashPath(prepared);
       if (observed !== null) await this.backup(destination, observed);
       await this.installPreparedFile(prepared, destination);
     } finally {
@@ -368,9 +373,11 @@ export class ManagedWriter {
     this.written.push(destination);
     if (this.options.dryRun) return true;
     const prepared = this.preparedPath(destination);
-    await copyTree(source, prepared);
-    const intended = await hashPath(prepared);
+    let intended: string;
     try {
+      // A copy that dies part-way leaves a partial tree; the finally removes it.
+      await copyTree(source, prepared);
+      intended = await hashPath(prepared);
       if (observed !== null) await this.backup(destination, observed);
       if (await pathExists(destination)) {
         throw new Error(`destination reappeared during managed directory replacement: ${destination}`);
