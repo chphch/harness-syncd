@@ -621,14 +621,17 @@ export async function commitCaptureStage(
     await assertSafeStorePath(project.storeDir, destination);
     await assertSafeStorePath(project.storeDir, prepared);
     const stagedInfo = await lstat(stagedSource);
-    if (stagedInfo.isFile()) {
-      await copyFileAtomicInside(project.storeDir, stagedSource, prepared);
-    } else {
-      await copyTreeForImportInside(project.storeDir, stagedSource, prepared);
-    }
     const expected = baselineHashes.get(relativePath);
     let backup: string | undefined;
     try {
+      // Inside the try: a copy that fails part-way must not leave a
+      // `.capture` entry in the canonical store. `backup` is still undefined
+      // then, so the catch below restores nothing.
+      if (stagedInfo.isFile()) {
+        await copyFileAtomicInside(project.storeDir, stagedSource, prepared);
+      } else {
+        await copyTreeForImportInside(project.storeDir, stagedSource, prepared);
+      }
       if (baselineExists.get(relativePath)) {
         if ((await hashPath(destination)) !== expected) {
           throw new Error(`canonical artifact changed before capture commit: ${relativePath}`);
