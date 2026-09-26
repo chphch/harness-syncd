@@ -660,7 +660,16 @@ async function walk(base: string, current: string, output: string[]): Promise<vo
       continue;
     }
     if (entry.isSymbolicLink()) {
-      const target = await stat(join(base, next));
+      let target;
+      try {
+        target = await stat(join(base, next));
+      } catch (error) {
+        // A dangling link has no content to import. A link projection becomes
+        // one the moment canonical removes its target, and the migration that
+        // recovers such a store walks this very directory.
+        if (isUnreachableLinkTarget(error)) continue;
+        throw error;
+      }
       if (target.isFile()) output.push(next);
       else if (target.isDirectory()) {
         throw new Error(
@@ -768,6 +777,18 @@ async function appendFileBytes(
 
 export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+/**
+ * Whether `error` is what stat() or realpath() raise for a symlink whose target
+ * cannot be reached: gone (ENOENT), below a component that is no longer a
+ * directory (ENOTDIR), or a loop (ELOOP). A managed link projection turns into
+ * one as soon as canonical removes what it points at, and it has to stay
+ * removable then: that removal is the projection of the canonical deletion.
+ */
+export function isUnreachableLinkTarget(error: unknown): boolean {
+  return isNodeError(error) &&
+    (error.code === "ENOENT" || error.code === "ENOTDIR" || error.code === "ELOOP");
 }
 
 function processIsAlive(pid: number): boolean {

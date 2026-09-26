@@ -24,6 +24,7 @@ import {
   hashNativePath,
   hashPaths,
   isNodeError,
+  isUnreachableLinkTarget,
   pathExists,
   resolvePhysicalPath,
   symlinkPointsTo,
@@ -406,7 +407,11 @@ export class ManagedWriter {
     if (this.options.dryRun) {
       if (existed) {
         const alreadyCorrect = await symlinkPointsTo(destination, source);
-        if (!alreadyCorrect && !this.options.force) {
+        if (
+          !alreadyCorrect &&
+          !this.options.force &&
+          !(await this.ownsOccupant(destination, observed!))
+        ) {
           this.skip(destination, "destination exists and is not a managed link");
           return false;
         }
@@ -417,11 +422,9 @@ export class ManagedWriter {
 
     let result = await ensureRelativeSymlink(source, destination);
     if (result === "occupied") {
-      // The occupant is ours when the ledger's recorded hash still matches —
-      // a copy→symlink mode change. Backing it up keeps the content recoverable.
+      // Backing the occupant up keeps its content recoverable.
       const occupiedHash = await hashPath(destination);
-      const ownedCopy = this.registry.files[destination] === occupiedHash;
-      if (this.options.force || ownedCopy) {
+      if (this.options.force || (await this.ownsOccupant(destination, occupiedHash))) {
         await this.assertNativePrecondition(destination, occupiedHash);
         await this.backup(destination, occupiedHash);
         result = await ensureRelativeSymlink(source, destination);
@@ -474,6 +477,19 @@ export class ManagedWriter {
     this.consumeNativePrecondition(destination);
     await this.flush();
     return true;
+  }
+
+  /**
+   * Whether the occupant of a link destination is this writer's own earlier
+   * projection, as the ledger records it: a copy still at its recorded hash (a
+   * copy→symlink mode change), or a link still naming its recorded source (a
+   * canonical directory that moved, leaving the old link dangling). The same
+   * ownership proof `canReplace` accepts for the copy writers.
+   */
+  private async ownsOccupant(destination: string, observedHash: string): Promise<boolean> {
+    if (this.registry.files[destination] === observedHash) return true;
+    const recorded = this.registry.links[destination];
+    return recorded !== undefined && (await symlinkPointsTo(destination, recorded));
   }
 
   private async canReplace(path: string): Promise<boolean> {
@@ -537,7 +553,7 @@ export class ManagedWriter {
     const sameLexicalPath = resolve(source) === resolve(destination);
     const samePhysicalPath =
       (await resolvePhysicalPath(source)) ===
-      (await resolvePhysicalPath(destination));
+      (await physicalDestination(destination));
     if (sameLexicalPath || samePhysicalPath) {
       if (
         !sameLexicalPath &&
@@ -646,9 +662,7 @@ export class ManagedWriter {
     const resolvedLink = originalLink && !isAbsolute(originalLink)
       ? resolve(dirname(path), originalLink)
       : originalLink;
-    const linkType = originalLink
-      ? ((await stat(path)).isDirectory() ? "dir" : "file")
-      : undefined;
+    const linkType = originalLink ? await linkTargetType(path) : undefined;
     const destination = join(
       this.options.storeDir,
       "backups",
@@ -955,4 +969,49 @@ function ownedPaths(registry: ManagedRegistry, target: TargetName): string[] {
 
 function ownerList(value: TargetName | TargetName[] | undefined): TargetName[] {
   return Array.isArray(value) ? value : value ? [value] : [];
+}
+
+/**
+ * The `type` symlink() needs to recreate the link at `path`, read without
+ * assuming its target still exists. Only Windows uses the value; a POSIX link
+ * has no type. A dangling link — what every link projection becomes once
+ * canonical removes its target — has no type to read, so it is left to
+ * symlink()'s own detection instead of failing the backup that removes it.
+ * The ledger cannot stand in: `link()` records no kind for a link.
+ */
+async function linkTargetType(path: string): Promise<"dir" | "file" | undefined> {
+  try {
+    return (await stat(path)).isDirectory() ? "dir" : "file";
+  } catch (error) {
+    if (isUnreachableLinkTarget(error)) return undefined;
+    throw error;
+  }
+}
+
+/**
+ * `destination`'s physical identity for the same-path check. A dangling link
+ * cannot alias the source, which exists while the link's target does not, and
+ * no writer writes through it: each one backs the link up or replaces it. So
+ * it is identified by its own directory entry rather than failing the check,
+ * as a canonical directory moved under a still-declared skill used to make it
+ * do on every cycle. Only the leaf is relaxed; a broken ancestor still throws.
+ */
+async function physicalDestination(destination: string): Promise<string> {
+  try {
+    return await resolvePhysicalPath(destination);
+  } catch (error) {
+    if (!(await isDanglingSymlink(destination))) throw error;
+    const absolute = resolve(destination);
+    return join(await resolvePhysicalPath(dirname(absolute)), basename(absolute));
+  }
+}
+
+async function isDanglingSymlink(path: string): Promise<boolean> {
+  try {
+    if (!(await lstat(path)).isSymbolicLink()) return false;
+    await stat(path);
+    return false;
+  } catch (error) {
+    return isUnreachableLinkTarget(error) && (await pathExists(path));
+  }
 }
