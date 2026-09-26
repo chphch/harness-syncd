@@ -90,6 +90,8 @@ export async function reconcileOnce(
     // not a flag somebody has to remember to set.
     const carry = await captureCarrySafely(project, await loadHarness(project.storeDir));
     const result = await reconcileUnlocked(project);
+    // A cycle that did not conflict means no conflict is current any more.
+    if (result.action !== "conflict") await clearConflictRecord(project.storeDir);
     return carry.warnings.length === 0
       ? result
       : { ...result, warnings: [...carry.warnings, ...result.warnings] };
@@ -1047,6 +1049,36 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value) ?? "undefined";
 }
 
+const CONFLICT_RECORD = join("conflicts", "current.json");
+
+/**
+ * The unresolved conflict, if any. Written by every conflicting cycle and
+ * removed by the first one that no longer conflicts (or by a re-baseline), so
+ * its presence means the controller is stuck right now — which is what
+ * `status` reports. It used to be kept forever once written, so it could not
+ * tell a ten-day-old resolved conflict from a live one.
+ */
+export async function readConflictRecord(storeDir: string): Promise<SyncConflict | null> {
+  const path = join(storeDir, CONFLICT_RECORD);
+  await assertSafeStorePath(storeDir, path);
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+    return typeof parsed === "object" && parsed !== null && "message" in parsed
+      ? (parsed as SyncConflict)
+      : null;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return null;
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+}
+
+async function clearConflictRecord(storeDir: string): Promise<void> {
+  const path = join(storeDir, CONFLICT_RECORD);
+  await assertSafeStorePath(storeDir, path);
+  await rm(path, { force: true });
+}
+
 async function recordConflict(
   project: LoadedProject,
   previous: ProjectionState,
@@ -1062,7 +1094,7 @@ async function recordConflict(
   };
   await writeJsonAtomicInside(
     project.storeDir,
-    join(project.storeDir, "conflicts", "current.json"),
+    join(project.storeDir, CONFLICT_RECORD),
     conflict,
   );
   return {
@@ -1081,13 +1113,16 @@ export async function establishBaseline(
   lastWriter: "canonical" | TargetName = "canonical",
   expectedCanonicalHash?: string,
 ): Promise<ProjectionState> {
-  return snapshotState(
+  const state = await snapshotState(
     project,
     harness,
     await readState(project.storeDir),
     lastWriter,
     expectedCanonicalHash ?? await hashCanonical(project, harness),
   );
+  // An explicit apply or migration that re-baselined resolves any conflict.
+  await clearConflictRecord(project.storeDir);
+  return state;
 }
 
 /**

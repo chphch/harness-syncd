@@ -1,7 +1,7 @@
 import chokidar, { type FSWatcher } from "chokidar";
 import { join, resolve } from "node:path";
 import { getAdapter } from "../adapters/index.js";
-import type { Scope, TargetName } from "../types.js";
+import type { Scope, SyncConflict, TargetName } from "../types.js";
 import {
   acquireLock,
   readTextIfExists,
@@ -23,7 +23,11 @@ import {
   loadProject,
   type LoadedProject,
 } from "./project.js";
-import { reconcileOnce, type ReconcileResult } from "./reconcile.js";
+import {
+  readConflictRecord,
+  reconcileOnce,
+  type ReconcileResult,
+} from "./reconcile.js";
 import { readState } from "./state.js";
 import { closeWatcher, watchProject } from "./daemon.js";
 
@@ -84,6 +88,8 @@ export interface ProjectStatusValue {
     fingerprint: string;
   }>;
   state: Awaited<ReturnType<typeof readState>>;
+  /** The unresolved conflict, if the last reconciliation ended in one. */
+  conflict: SyncConflict | null;
   git: Awaited<ReturnType<typeof getGitStatus>>;
 }
 
@@ -396,11 +402,21 @@ export async function statusAllControllers(
             value: await buildProjectStatus(entry),
           };
         }
+        const value = await buildProjectStatus(entry);
+        if (value.conflict) {
+          return {
+            id: entry.id,
+            configPath: entry.config,
+            status: "conflict",
+            error: value.conflict.message,
+            value,
+          };
+        }
         return {
           id: entry.id,
           configPath: entry.config,
           status: "ok",
-          value: await buildProjectStatus(entry),
+          value,
         };
       } catch (error) {
         return {
@@ -632,6 +648,7 @@ async function buildProjectStatus(
     watch: entry.watch,
     targets,
     state: await readState(entry.project.storeDir),
+    conflict: await readConflictRecord(entry.project.storeDir),
     git: await getGitStatus(entry.project.storeDir),
   };
 }

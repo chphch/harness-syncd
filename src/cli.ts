@@ -42,7 +42,11 @@ import {
   removeController,
   updateController,
 } from "./core/registry.js";
-import { establishBaseline, reconcileOnce } from "./core/reconcile.js";
+import {
+  establishBaseline,
+  readConflictRecord,
+  reconcileOnce,
+} from "./core/reconcile.js";
 import { scanStoreForSecrets } from "./core/secret-scan.js";
 import {
   partitionByAllowlist,
@@ -460,6 +464,7 @@ program
       scope: project.config.scope,
       targets,
       state: await readState(project.storeDir),
+      conflict: await readConflictRecord(project.storeDir),
       git: await getGitStatus(project.storeDir),
       carry: await carrySummary(project),
     });
