@@ -784,7 +784,11 @@ async function nativeRoundTripMismatches(
   }
 }
 
-async function nativePathsEquivalent(
+/**
+ * Whether two native paths mean the same thing: structured files compare by
+ * parsed value, everything else byte-for-byte. Exported for its tests.
+ */
+export async function nativePathsEquivalent(
   left: string,
   right: string,
   target: TargetName,
@@ -848,7 +852,12 @@ async function nativePathsEquivalent(
         stableStringify(leftDocument.data) === stableStringify(rightDocument.data);
     }
   } catch {
-    return false;
+    // Unparseable is not the same as different. A SKILL.md whose frontmatter
+    // strict YAML rejects (Claude Code accepts it) used to compare unequal to
+    // its own byte-identical projection, so every edit to that skill became a
+    // permanent "partially representable" conflict. Identical bytes are
+    // equivalent whatever they contain; anything else stays a mismatch.
+    return leftBuffer.equals(rightBuffer);
   }
   return leftBuffer.equals(rightBuffer);
 }
