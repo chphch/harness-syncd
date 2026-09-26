@@ -7,6 +7,7 @@ import { migrateFrom } from "../src/core/migrate.js";
 import { initializeProject, type LoadedProject } from "../src/core/project.js";
 import { reconcileOnce } from "../src/core/reconcile.js";
 import { readState } from "../src/core/state.js";
+import { refreshManagedTargetHashes } from "../src/core/writer.js";
 
 /**
  * One-shot hooks at the seams of an inverse capture, so a native or canonical
@@ -176,6 +177,25 @@ describe("a native edit racing a committed inverse capture", () => {
       .toBe("Edited in the store\n");
     expect(await allowList(project)).toContain("Bash(pnpm test)");
     expect((await reconcileOnce(project)).action).toBe("noop");
+  });
+
+  it("measures, rather than pins, a source path another target's projection rewrote", async () => {
+    // Codex and Antigravity can own one physical file. When the other owner's
+    // projection rewrites it after the capture, the ledger follows the new
+    // bytes; pinning the source to its pre-projection fingerprint would then
+    // read next cycle as a changed target with no changed path.
+    const { project, settingsPath } = await fixture({ permissions: { allow: ["Read"] } });
+    await writeFile(settingsPath, JSON.stringify(EDIT), "utf8");
+    hooks.afterApply = async () => {
+      await writeFile(settingsPath, `${JSON.stringify(EDIT, null, 2)}\n`, "utf8");
+      await refreshManagedTargetHashes(project.storeDir, "claude");
+    };
+
+    expect((await reconcileOnce(project)).action).toBe("captured-native");
+    const next = await reconcileOnce(project);
+
+    expect(next.conflict?.message).toBeUndefined();
+    expect(next.action).toBe("noop");
   });
 
   it("reports the capture as done even though the source moved on", async () => {

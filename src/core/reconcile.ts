@@ -977,12 +977,15 @@ export async function establishBaseline(
 }
 
 /**
- * Verify the projection and persist the resulting state. `pinned` targets are
- * recorded with the given fingerprint instead of being verified and
- * re-measured: an inverse capture pins its source to the fingerprint of the
- * content it captured, which the ledger records too, so a source that has
- * already moved on is seen — and captured — by the next cycle rather than
- * failing this snapshot.
+ * Verify the projection and persist the resulting state.
+ *
+ * `captured` maps an inverse capture's source to the fingerprint of the content
+ * it captured, which the ledger records too. A source whose content still
+ * matches the ledger is measured like any other target (another owner of a
+ * shared path may legitimately have rewritten it, ledger included). One that
+ * no longer matches has moved on since the capture: it is recorded with the
+ * captured fingerprint instead of failing this snapshot, so the next cycle
+ * sees the newer edit as a native change and captures it.
  */
 async function snapshotState(
   project: LoadedProject,
@@ -990,8 +993,16 @@ async function snapshotState(
   previous: ProjectionState | null,
   lastWriter: "canonical" | TargetName,
   expectedCanonicalHash: string,
-  pinned: Partial<Record<TargetName, string>> = {},
+  captured: Partial<Record<TargetName, string>> = {},
 ): Promise<ProjectionState> {
+  const pinned: Partial<Record<TargetName, string>> = {};
+  for (const [target, fingerprint] of Object.entries(captured) as Array<[TargetName, string]>) {
+    try {
+      await assertManagedTargetMatchesRegistry(project.storeDir, target);
+    } catch {
+      pinned[target] = fingerprint;
+    }
+  }
   const measured = enabledTargets(project).filter((target) => !(target in pinned));
   await assertProjectionStable(project, harness, expectedCanonicalHash, measured);
   const targetHashes = await fingerprintTargets(project, measured);
