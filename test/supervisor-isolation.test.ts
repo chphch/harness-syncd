@@ -7,7 +7,11 @@ import { watchProject } from "../src/core/daemon.js";
 import { pathExists } from "../src/core/fs.js";
 import { addController } from "../src/core/registry.js";
 import { initializeProject, type LoadedProject } from "../src/core/project.js";
-import { watchAllControllers, type FleetWatchEvent } from "../src/core/supervisor.js";
+import {
+  watchAllControllers,
+  type FleetWatchEvent,
+  type RestartPolicy,
+} from "../src/core/supervisor.js";
 
 vi.mock("../src/core/daemon.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/core/daemon.js")>();
@@ -43,7 +47,10 @@ interface Fleet {
   count(type: FleetWatchEvent["type"], id: string): number;
 }
 
-function startFleet(registryPath: string, restartPolicy = fastPolicy): Fleet {
+function startFleet(
+  registryPath: string,
+  restartPolicy: Partial<RestartPolicy> = fastPolicy,
+): Fleet {
   const events: FleetWatchEvent[] = [];
   const abort = new AbortController();
   let settled: string | undefined;
@@ -185,17 +192,100 @@ describe("fleet isolates a failing controller", () => {
     fleet.abort.abort();
 
     expect(await fleet.outcome).toBe("resolved");
-    expect(fleet.events).toContainEqual({
-      type: "parked",
-      id: "first",
-      configPath: first.configPath,
-      error: "Cannot read properties of undefined (reading 'x')",
-    });
+    expect(fleet.events).toContainEqual(
+      expect.objectContaining({
+        type: "parked",
+        id: "first",
+        configPath: first.configPath,
+        error: "Cannot read properties of undefined (reading 'x')",
+      }),
+    );
     expect(fleet.count("started", "first")).toBe(1);
     expect(fleet.count("restarting", "first")).toBe(0);
     expect(fleet.count("result", "first")).toBe(0);
     expect(await pathExists(join(first.storeDir, ".lock"))).toBe(false);
     expect(await pathExists(join(second.storeDir, ".lock"))).toBe(false);
+  });
+
+  it("keeps reminding that a controller is parked, with the stack on the first notice", async () => {
+    const root = await tempRoot();
+    const registryPath = join(root, "registry.yaml");
+    const first = await makeQuietController(join(root, "first"), "first");
+    const second = await makeQuietController(join(root, "second"), "second");
+    await addController(first.configPath, { registryPath });
+    await addController(second.configPath, { registryPath });
+    vi.mocked(watchProject).mockImplementationOnce(
+      failAfter(5, "Cannot read properties of undefined (reading 'x')"),
+    );
+
+    const fleet = startFleet(registryPath, { ...fastPolicy, parkedReminderMs: 40 });
+    await fleet.waitFor(() => fleet.count("parked", "first") >= 3);
+    fleet.abort.abort();
+
+    expect(await fleet.outcome).toBe("resolved");
+    const parked = fleet.events.filter(
+      (event): event is Extract<FleetWatchEvent, { type: "parked" }> =>
+        event.type === "parked" && event.id === "first",
+    );
+    expect(parked[0]).toMatchObject({ error: "Cannot read properties of undefined (reading 'x')" });
+    expect(parked[0]?.reminder).toBeUndefined();
+    expect(parked[0]?.stack).toMatch(/Cannot read properties/u);
+    expect(Date.parse(parked[0]!.since)).not.toBeNaN();
+    for (const reminder of parked.slice(1)) {
+      expect(reminder).toMatchObject({ reminder: true, since: parked[0]!.since });
+      expect(reminder.stack).toBeUndefined();
+    }
+  });
+
+  it("stops the fleet with an error once every controller is parked", async () => {
+    // Nothing is syncing any more: staying up would look healthy to a service
+    // manager while doing nothing, so the process must end nonzero instead.
+    const root = await tempRoot();
+    const registryPath = join(root, "registry.yaml");
+    const first = await makeQuietController(join(root, "first"), "first");
+    const second = await makeQuietController(join(root, "second"), "second");
+    await addController(first.configPath, { registryPath });
+    await addController(second.configPath, { registryPath });
+    vi.mocked(watchProject).mockImplementation(async () => {
+      throw new TypeError("Cannot read properties of undefined (reading 'x')");
+    });
+
+    const fleet = startFleet(registryPath);
+    const settled = await Promise.race([
+      fleet.outcome,
+      new Promise((resolvePromise) => setTimeout(resolvePromise, 3_000, "still running")),
+    ]);
+    fleet.abort.abort();
+
+    expect(settled).toMatch(/^rejected: every controller is parked.*first.*second/su);
+    expect(await pathExists(join(first.storeDir, ".lock"))).toBe(false);
+    expect(await pathExists(join(second.storeDir, ".lock"))).toBe(false);
+  });
+
+  it("reports every controller stopped at shutdown, parked and backing off included", async () => {
+    const root = await tempRoot();
+    const registryPath = join(root, "registry.yaml");
+    const parked = await makeQuietController(join(root, "parked"), "parked");
+    const waiting = await makeQuietController(join(root, "waiting"), "waiting");
+    const healthy = await makeQuietController(join(root, "healthy"), "healthy");
+    for (const project of [parked, waiting, healthy]) {
+      await addController(project.configPath, { registryPath });
+    }
+    vi.mocked(watchProject)
+      .mockImplementationOnce(failAfter(5, "Cannot read properties of undefined"))
+      .mockImplementationOnce(failAfter(5, "EMFILE: too many open files", "EMFILE"));
+
+    const fleet = startFleet(registryPath, { ...fastPolicy, baseMs: 60_000, maxMs: 60_000 });
+    await fleet.waitFor(() => fleet.count("parked", "parked") === 1);
+    await fleet.waitFor(() => fleet.count("restarting", "waiting") === 1);
+    await fleet.waitFor(() => fleet.count("result", "healthy") >= 1);
+    fleet.abort.abort();
+
+    expect(await fleet.outcome).toBe("resolved");
+    for (const id of ["parked", "waiting", "healthy"]) {
+      expect(fleet.count("stopped", id)).toBe(1);
+      expect(fleet.events.filter((event) => event.id === id).at(-1)?.type).toBe("stopped");
+    }
   });
 
   it("still stops the fleet when a controller needs its config reloaded", async () => {

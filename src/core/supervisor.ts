@@ -29,7 +29,7 @@ import {
   type ReconcileResult,
 } from "./reconcile.js";
 import { readState } from "./state.js";
-import { closeWatcher, watchProject } from "./daemon.js";
+import { closeWatcher, watchProject, type WatchErrorKind } from "./daemon.js";
 
 export type ControllerPlanIntent = "sync" | "watch";
 
@@ -121,6 +121,11 @@ export type FleetWatchEvent =
       id: string;
       configPath: string;
       error: string;
+      /**
+       * What failed: a reconciliation cycle, a Git backup, or the controller's
+       * watch loop itself (a restarting/parked event follows that one).
+       */
+      during?: WatchErrorKind;
     }
   | {
       /** One path this controller's watcher skipped; the audit still covers it. */
@@ -141,11 +146,20 @@ export type FleetWatchEvent =
       delayMs: number;
     }
   | {
-      /** A failure retrying cannot fix; this controller stays stopped. */
+      /**
+       * A failure retrying cannot fix; this controller stays stopped. Sent
+       * again every parkedReminderMs, with `reminder: true`, for as long as it
+       * stays parked, so the log keeps saying so.
+       */
       type: "parked";
       id: string;
       configPath: string;
       error: string;
+      /** When the controller was parked. */
+      since: string;
+      /** Only on the first notice. */
+      stack?: string;
+      reminder?: true;
     };
 
 export interface RestartPolicy {
@@ -155,12 +169,15 @@ export interface RestartPolicy {
   maxMs: number;
   /** A run at least this long counts as healthy and resets the backoff. */
   healthyAfterMs: number;
+  /** How often a parked controller is reported again. */
+  parkedReminderMs: number;
 }
 
 export const DEFAULT_RESTART_POLICY: RestartPolicy = {
   baseMs: 10_000,
   maxMs: 600_000,
   healthyAfterMs: 600_000,
+  parkedReminderMs: 3_600_000,
 };
 
 export interface WatchAllOptions {
@@ -458,7 +475,8 @@ export async function watchAllControllers(
     | { kind: "registry" }
     | { kind: "config"; id: string; configPath: string }
     | { kind: "watcher-error"; error: string }
-    | { kind: "controller"; id: string; error?: string };
+    | { kind: "controller"; id: string; error?: string }
+    | { kind: "all-parked" };
   let settleStop: ((reason: StopReason) => void) | undefined;
   let settled = false;
   const stopped = new Promise<StopReason>((resolvePromise) => {
@@ -525,6 +543,7 @@ export async function watchAllControllers(
       );
     }
     const policy: RestartPolicy = { ...DEFAULT_RESTART_POLICY, ...options.restartPolicy };
+    const parkedErrors = new Map<string, string>();
     // Each controller runs in its own loop, so one failure no longer stops the
     // other stores. It used to: every controller error settled the fleet, the
     // process exited 1 and launchd respawned it — a socket in ONE project's
@@ -533,62 +552,93 @@ export async function watchAllControllers(
     const superviseController = async (controller: PlannedController): Promise<void> => {
       const base = { id: controller.id, configPath: controller.configPath };
       let attempt = 0;
-      while (!childController.signal.aborted) {
-        options.onEvent?.({ type: "started", ...base });
-        const startedAt = Date.now();
-        let reportedError: string | undefined;
-        let reloadRequired: string | undefined;
-        let failure: unknown;
-        try {
-          await watchProject(controller.project, {
-            lock: false,
-            signal: childController.signal,
-            expectedConfigSnapshot: controller.configSnapshot,
-            onResult: (result) => options.onEvent?.({ type: "result", ...base, result }),
-            onWarning: (warning) =>
-              options.onEvent?.({
-                type: "warning",
-                ...base,
-                path: warning.path,
-                ...(warning.code ? { code: warning.code } : {}),
-                warning: warning.message,
-              }),
-            onError: (error) => {
-              reportedError = error.message;
-              options.onEvent?.({ type: "error", ...base, error: error.message });
-              if (error.message.includes(FLEET_RESTART_MARKER)) reloadRequired = error.message;
-            },
-          });
-          if (childController.signal.aborted) {
-            options.onEvent?.({ type: "stopped", ...base });
+      let started = false;
+      try {
+        while (!childController.signal.aborted) {
+          options.onEvent?.({ type: "started", ...base });
+          started = true;
+          const startedAt = Date.now();
+          let reportedError: string | undefined;
+          let reloadRequired: string | undefined;
+          let failure: unknown;
+          try {
+            await watchProject(controller.project, {
+              lock: false,
+              signal: childController.signal,
+              expectedConfigSnapshot: controller.configSnapshot,
+              onResult: (result) => options.onEvent?.({ type: "result", ...base, result }),
+              onWarning: (warning) =>
+                options.onEvent?.({
+                  type: "warning",
+                  ...base,
+                  path: warning.path,
+                  ...(warning.code ? { code: warning.code } : {}),
+                  warning: warning.message,
+                }),
+              onError: (error, during) => {
+                reportedError = error.message;
+                options.onEvent?.({
+                  type: "error",
+                  ...base,
+                  error: error.message,
+                  ...(during ? { during } : {}),
+                });
+                if (error.message.includes(FLEET_RESTART_MARKER)) reloadRequired = error.message;
+              },
+            });
+            if (childController.signal.aborted) return;
+            // watchProject resolves only when aborted; anything else is a bug.
+            failure = new Error(reloadRequired ?? "watch loop ended without being stopped");
+          } catch (error) {
+            failure = error;
+            const message = errorMessage(error);
+            if (reportedError !== message) {
+              options.onEvent?.({ type: "error", ...base, error: message, during: "watch" });
+            }
+            if (childController.signal.aborted) return;
+          }
+          const message = errorMessage(failure);
+          if (reloadRequired !== undefined || message.includes(FLEET_RESTART_MARKER)) {
+            settleStop?.({ kind: "controller", id: controller.id, error: reloadRequired ?? message });
             return;
           }
-          // watchProject resolves only when aborted; anything else is a bug.
-          failure = new Error(reloadRequired ?? "watch loop ended without being stopped");
-        } catch (error) {
-          failure = error;
-          const message = errorMessage(error);
-          if (reportedError !== message) {
-            options.onEvent?.({ type: "error", ...base, error: message });
+          if (!hasErrnoCode(failure)) {
+            // Retrying cannot fix a programming error. Leave it stopped for
+            // inspection while the other controllers keep going — but keep
+            // saying so, since a parked controller emits nothing else.
+            const since = new Date().toISOString();
+            const stack = failure instanceof Error ? failure.stack : undefined;
+            options.onEvent?.({
+              type: "parked",
+              ...base,
+              error: message,
+              since,
+              ...(stack ? { stack } : {}),
+            });
+            parkedErrors.set(controller.id, message);
+            if (parkedErrors.size === plan.controllers.length) {
+              // Nothing syncs any more. Staying up would look healthy to the
+              // service manager, so end the process nonzero instead.
+              settleStop?.({ kind: "all-parked" });
+              return;
+            }
+            while (!childController.signal.aborted) {
+              await abortableDelay(policy.parkedReminderMs, childController.signal);
+              if (childController.signal.aborted) break;
+              options.onEvent?.({ type: "parked", ...base, error: message, since, reminder: true });
+            }
+            return;
           }
-          if (childController.signal.aborted) return;
+          if (Date.now() - startedAt >= policy.healthyAfterMs) attempt = 0;
+          const delayMs = Math.min(policy.maxMs, policy.baseMs * 2 ** attempt);
+          attempt += 1;
+          options.onEvent?.({ type: "restarting", ...base, error: message, attempt, delayMs });
+          await abortableDelay(delayMs, childController.signal);
         }
-        const message = errorMessage(failure);
-        if (reloadRequired !== undefined || message.includes(FLEET_RESTART_MARKER)) {
-          settleStop?.({ kind: "controller", id: controller.id, error: reloadRequired ?? message });
-          return;
-        }
-        if (!hasErrnoCode(failure)) {
-          // Retrying cannot fix a programming error or an invalid controller.
-          // Leave it stopped for inspection; the other controllers keep going.
-          options.onEvent?.({ type: "parked", ...base, error: message });
-          return;
-        }
-        if (Date.now() - startedAt >= policy.healthyAfterMs) attempt = 0;
-        const delayMs = Math.min(policy.maxMs, policy.baseMs * 2 ** attempt);
-        attempt += 1;
-        options.onEvent?.({ type: "restarting", ...base, error: message, attempt, delayMs });
-        await abortableDelay(delayMs, childController.signal);
+      } finally {
+        // Exactly one "stopped" per controller, whether it was running, parked
+        // or waiting out a backoff when the fleet stopped.
+        if (started) options.onEvent?.({ type: "stopped", ...base });
       }
     };
     for (const controller of plan.controllers) {
@@ -614,6 +664,12 @@ export async function watchAllControllers(
     }
     if (reason.kind === "watcher-error") {
       throw new Error(`controller control watcher failed: ${reason.error}`);
+    }
+    if (reason.kind === "all-parked") {
+      throw new Error(
+        "every controller is parked, so nothing is being synced: " +
+          [...parkedErrors].map(([id, error]) => `${id}: ${error}`).join("; "),
+      );
     }
     throw new Error(
       `controller ${reason.id} stopped${reason.error ? `: ${reason.error}` : " unexpectedly"}`,

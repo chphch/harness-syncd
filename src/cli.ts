@@ -59,7 +59,7 @@ import { driftedManagedPaths } from "./core/writer.js";
 import { validateHarness } from "./core/validate.js";
 import { CARRY_STORE_PREFIX } from "./core/carry-entry.js";
 import { carrySummary, registerCarryCommands } from "./cli-carry.js";
-import { createFleetNoticeWriter, createWarningNoticeWriter } from "./cli-fleet.js";
+import { createFleetNoticeWriter, formatNotice } from "./cli-fleet.js";
 import {
   statusAllControllers,
   syncAllControllers,
@@ -402,10 +402,11 @@ program
   .action(async (options: { all?: boolean }) => {
     if (options.all) assertNoCwdWithAll();
     const signals = processAbortController();
+    const stderr = (text: string) => process.stderr.write(text);
+    const notice = createFleetNoticeWriter(stderr);
     try {
       if (options.all) {
         printEvent({ watching: "all", registry: registryPath() });
-        const notice = createFleetNoticeWriter((text) => process.stderr.write(text));
         await watchAllControllers({
           registryPath: registryPath(),
           signal: signals.controller.signal,
@@ -416,21 +417,49 @@ program
             }
           },
         });
-        return;
+      } else {
+        const project = await loadProject(cwd());
+        print({
+          watching: project.projectRoot,
+          auditIntervalMs: project.config.sync.auditIntervalMs,
+        });
+        // The fleet notices, for this one controller.
+        const base = {
+          id: project.config.controllerId ?? project.projectRoot,
+          configPath: project.configPath,
+        };
+        await watchProject(project, {
+          signal: signals.controller.signal,
+          onResult: (result) => {
+            notice({ type: "result", ...base, result });
+            if (result.action !== "noop") print(result);
+          },
+          onError: (error, during) => {
+            notice({ type: "error", ...base, error: error.message, during });
+          },
+          onWarning: (warning) =>
+            notice({
+              type: "warning",
+              ...base,
+              path: warning.path,
+              ...(warning.code ? { code: warning.code } : {}),
+              warning: warning.message,
+            }),
+        });
       }
-      const project = await loadProject(cwd());
-      print({
-        watching: project.projectRoot,
-        auditIntervalMs: project.config.sync.auditIntervalMs,
-      });
-      await watchProject(project, {
-        signal: signals.controller.signal,
-        onResult: (result) => {
-          if (result.action !== "noop") print(result);
-        },
-        onError: (error) => process.stderr.write(`${error.message}\n`),
-        onWarning: createWarningNoticeWriter((text) => process.stderr.write(text)),
-      });
+      const reason: unknown = signals.controller.signal.reason;
+      if (signals.controller.signal.aborted) {
+        // A signal is the one way this command ends with status 0, so say so:
+        // a service manager that restarts only on failure will not relaunch it.
+        stderr(formatNotice(
+          new Date(),
+          `stopped by ${typeof reason === "string" ? reason : "a signal"}; exiting with status 0`,
+        ));
+      }
+    } catch (error) {
+      // This stream is the daemon's log: date the line that ends it too.
+      stderr(formatNotice(new Date(), error instanceof Error ? error.message : String(error)));
+      process.exitCode = 1;
     } finally {
       signals.dispose();
     }
@@ -786,7 +815,8 @@ function processAbortController(): {
   dispose: () => void;
 } {
   const controller = new AbortController();
-  const stop = () => controller.abort();
+  // The signal's name becomes the abort reason, for the shutdown notice.
+  const stop = (signal: NodeJS.Signals) => controller.abort(signal);
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   return {
@@ -799,7 +829,7 @@ function processAbortController(): {
 }
 
 function printFleetWatchEvent(event: FleetWatchEvent): void {
-  printEvent({ controller: event.id, config: event.configPath, ...event });
+  printEvent({ at: new Date().toISOString(), controller: event.id, config: event.configPath, ...event });
 }
 
 function printEvent(value: unknown): void {

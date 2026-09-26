@@ -11,9 +11,17 @@ import {
 } from "./project.js";
 import { reconcileOnce, type ReconcileResult } from "./reconcile.js";
 
+/** What an onError report came from; see WatchOptions.onError. */
+export type WatchErrorKind = "sync" | "backup" | "watch";
+
 export interface WatchOptions {
   onResult?: (result: ReconcileResult) => void;
-  onError?: (error: Error) => void;
+  /**
+   * `sync`: one reconciliation cycle failed and the next one retries.
+   * `backup`: a periodic Git backup failed. `watch`: the watch loop itself is
+   * stopping (a fatal watcher error, or a config change that needs a reload).
+   */
+  onError?: (error: Error, during: WatchErrorKind) => void;
   /**
    * One path the watcher could not watch and now skips. The controller keeps
    * running: the watcher only buys latency, and the audit tick still
@@ -224,7 +232,7 @@ export async function watchProject(
     const liveWatcher = watcher;
     const fail = (error: unknown) => {
       const normalized = normalizeError(error);
-      options.onError?.(normalized);
+      options.onError?.(normalized, "watch");
       stopping = true;
       settleStop?.(normalized);
     };
@@ -263,8 +271,9 @@ export async function watchProject(
           options.onResult?.(result);
         } catch (error) {
           const normalized = normalizeError(error);
-          options.onError?.(normalized);
-          if (normalized.message.includes("restart harness-sync watch")) {
+          const reload = normalized.message.includes("restart harness-sync watch");
+          options.onError?.(normalized, reload ? "watch" : "sync");
+          if (reload) {
             stopping = true;
             settleStop?.(normalized);
           }
@@ -325,7 +334,7 @@ export async function watchProject(
           } catch (error) {
             // A failed backup must not stop the watcher: projection is the
             // daemon's job and it still works. Report and keep watching.
-            options.onError?.(normalizeError(error));
+            options.onError?.(normalizeError(error), "backup");
           }
         })();
       }, Math.max(60_000, project.config.git.backupIntervalMs));

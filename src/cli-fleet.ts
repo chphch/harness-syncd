@@ -1,54 +1,143 @@
-import type { WatchWarning } from "./core/daemon.js";
 import type { FleetWatchEvent } from "./core/supervisor.js";
+
+export interface NoticeOptions {
+  now?: () => Date;
+  /** How often a problem that persists unchanged is reported again. */
+  repeatMs?: number;
+}
+
+export const DEFAULT_NOTICE_REPEAT_MS = 3_600_000;
 
 /**
  * The fleet events a person must see even when nobody reads the JSON event
- * stream on stdout: a controller restarting, a controller parked for good, and
- * a path the watcher gave up on. Each becomes one stderr line, which is where
- * launchd's log and a foreground terminal both put it. A path is reported once
- * per controller: chokidar stops retrying an unwatched path, but a restarted
- * controller would otherwise announce the same socket again on every attempt.
+ * stream on stdout, one timestamped stderr line each — which is where
+ * launchd's log and a foreground terminal both put it:
+ *
+ * - a controller restarting, parked for good (again every hour from the
+ *   supervisor while it stays parked), or skipping a path it cannot watch;
+ * - a controller whose reconciliation cycles conflict or fail, or whose Git
+ *   backup fails. These used to reach stdout only: on 2026-09-16 a store
+ *   recorded the same conflict every 30 seconds for ten days, and stderr —
+ *   where the fleet docs tell operators to look — stayed empty. A problem is
+ *   written when it starts or changes, again every `repeatMs` while it
+ *   persists, and once more when the next cycle succeeds.
+ *
+ * A path warning is written once per controller and path: chokidar stops
+ * retrying an unwatched path, but a restarted controller would otherwise
+ * announce the same socket again on every attempt.
  */
 export function createFleetNoticeWriter(
   write: (text: string) => void,
+  options: NoticeOptions = {},
 ): (event: FleetWatchEvent) => void {
+  const now = options.now ?? (() => new Date());
+  const repeatMs = options.repeatMs ?? DEFAULT_NOTICE_REPEAT_MS;
   const warned = new Set<string>();
+  const problems = new Map<string, Problem>();
+  const line = (text: string) => write(formatNotice(now(), text));
+
+  const problem = (
+    event: { id: string },
+    channel: "sync" | "backup",
+    kind: Problem["kind"],
+    message: string,
+  ) => {
+    const key = `${event.id}\0${channel}`;
+    const at = now().getTime();
+    const current = problems.get(key);
+    const [label, stillLabel] = PROBLEM_LABELS[`${channel} ${kind}`];
+    if (!current || current.kind !== kind || current.message !== message) {
+      problems.set(key, { kind, message, since: at, lastNotice: at });
+      line(`controller ${event.id} ${label}: ${oneLine(message)}`);
+      return;
+    }
+    if (at - current.lastNotice < repeatMs) return;
+    current.lastNotice = at;
+    line(
+      `controller ${event.id} ${stillLabel} since ` +
+        `${new Date(current.since).toISOString()}: ${oneLine(message)}`,
+    );
+  };
+
   return (event) => {
-    if (event.type === "restarting") {
-      write(
-        `harness-sync: controller ${event.id} restarting in ${formatDelay(event.delayMs)} ` +
-          `(attempt ${event.attempt}): ${oneLine(event.error)}\n`,
-      );
-    } else if (event.type === "parked") {
-      write(
-        `harness-sync: controller ${event.id} parked (not retrying): ${oneLine(event.error)} ` +
-          "— restart the daemon after fixing\n",
-      );
-    } else if (event.type === "warning") {
-      const key = `${event.id}\0${event.path}`;
-      if (warned.has(key)) return;
-      warned.add(key);
-      write(
-        `harness-sync: controller ${event.id} is not watching ${event.path}: ` +
-          `${oneLine(event.warning)} (the periodic audit still reconciles it)\n`,
-      );
+    switch (event.type) {
+      case "restarting":
+        line(
+          `controller ${event.id} restarting in ${formatDelay(event.delayMs)} ` +
+            `(attempt ${event.attempt}): ${oneLine(event.error)}`,
+        );
+        return;
+      case "parked":
+        if (event.reminder) {
+          line(
+            `controller ${event.id} still parked since ${event.since} (not retrying): ` +
+              oneLine(event.error),
+          );
+          return;
+        }
+        line(
+          `controller ${event.id} parked (not retrying): ${oneLine(event.error)} — fix it, then ` +
+            "restart the daemon through its service manager (a plain SIGTERM exits 0, which a " +
+            "restart-on-failure service does not relaunch)",
+        );
+        for (const frame of stackFrames(event.stack)) write(`    ${frame}\n`);
+        return;
+      case "warning": {
+        const key = `${event.id}\0${event.path}`;
+        if (warned.has(key)) return;
+        warned.add(key);
+        line(
+          `controller ${event.id} is not watching ${event.path}: ` +
+            `${oneLine(event.warning)} (the periodic audit still reconciles it)`,
+        );
+        return;
+      }
+      case "result": {
+        if (event.result.action === "conflict") {
+          problem(event, "sync", "conflict", event.result.conflict?.message ?? "native/canonical conflict");
+          return;
+        }
+        const key = `${event.id}\0sync`;
+        const current = problems.get(key);
+        if (!current) return;
+        problems.delete(key);
+        line(
+          `controller ${event.id} synced again (${event.result.action}) after a ` +
+            `${current.kind === "conflict" ? "conflict" : "failure"} since ` +
+            new Date(current.since).toISOString(),
+        );
+        return;
+      }
+      case "error":
+        // A watch-loop failure is followed by its own restarting/parked notice.
+        if (event.during === "sync") problem(event, "sync", "error", event.error);
+        else if (event.during === "backup") problem(event, "backup", "error", event.error);
+        return;
+      case "started":
+      case "stopped":
+        return;
     }
   };
 }
 
-/** The single-controller `watch` counterpart of the fleet warning notice. */
-export function createWarningNoticeWriter(
-  write: (text: string) => void,
-): (warning: WatchWarning) => void {
-  const warned = new Set<string>();
-  return (warning) => {
-    if (warned.has(warning.path)) return;
-    warned.add(warning.path);
-    write(
-      `harness-sync: not watching ${warning.path}: ${oneLine(warning.message)} ` +
-        "(the periodic audit still reconciles it)\n",
-    );
-  };
+interface Problem {
+  kind: "conflict" | "error";
+  message: string;
+  since: number;
+  lastNotice: number;
+}
+
+/** [first notice, repeat notice] per channel and kind. */
+const PROBLEM_LABELS: Record<`${"sync" | "backup"} ${Problem["kind"]}`, [string, string]> = {
+  "sync conflict": ["sync conflict", "still in conflict"],
+  "sync error": ["sync failed", "still failing to sync"],
+  "backup conflict": ["backup conflict", "backup still in conflict"],
+  "backup error": ["backup failed", "backup still failing"],
+};
+
+/** One stderr line: an ISO-8601 time, so a line can be dated without context. */
+export function formatNotice(at: Date, text: string): string {
+  return `${at.toISOString()} harness-sync: ${text}\n`;
 }
 
 export function formatDelay(ms: number): string {
@@ -58,6 +147,16 @@ export function formatDelay(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return seconds === 0 ? `${minutes}m` : `${minutes}m${seconds}s`;
+}
+
+/** The "at …" lines of a stack; the first line repeats the message. */
+function stackFrames(stack: string | undefined): string[] {
+  if (!stack) return [];
+  return stack
+    .split(/\r?\n/u)
+    .slice(1)
+    .map((frame) => frame.trim())
+    .filter((frame) => frame.length > 0);
 }
 
 function oneLine(text: string): string {
