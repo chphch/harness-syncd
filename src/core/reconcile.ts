@@ -256,6 +256,14 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
           `${source} changed after semantic verification; ownership hashes were not refreshed`,
         );
       }
+      // Cleared FIRST, before anything below can return early: the check
+      // above already proved the removal intentional, whatever canonical does
+      // next. Left in place, a canonical edit landing during the refresh made
+      // this cycle return a conflict with the base still there, and the next
+      // projection merged the value the user had deleted back into the native
+      // file. Clearing before the refresh also keeps a failed refresh
+      // harmless: the next cycle simply verifies the same no-op again.
+      await clearPreservedLocalBase(project.storeDir, source);
       // From here the ledger records the verified content, so every exit
       // must leave a state pairing it with that content's fingerprint. A
       // ledger ahead of the state reads, next cycle, as a changed target with
@@ -298,7 +306,6 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
           "Canonical configuration changed while ownership hashes were refreshed; the next reconcile projects it",
         );
       }
-      await clearPreservedLocalBase(project.storeDir, source);
       const state = await snapshotState(
         project,
         harness,

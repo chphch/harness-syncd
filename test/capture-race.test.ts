@@ -1,8 +1,8 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadHarness } from "../src/core/config.js";
+import { loadHarness, writeHarness } from "../src/core/config.js";
 import { migrateFrom } from "../src/core/migrate.js";
 import { initializeProject, type LoadedProject } from "../src/core/project.js";
 import { reconcileOnce } from "../src/core/reconcile.js";
@@ -18,6 +18,7 @@ const hooks = vi.hoisted(() => ({
   afterApply: null as null | (() => Promise<void>),
   afterClearLocalBase: null as null | (() => Promise<void>),
   beforeRefresh: null as null | (() => Promise<void>),
+  beforeSnapshot: null as null | (() => Promise<void>),
 }));
 
 async function fire(name: keyof typeof hooks): Promise<void> {
@@ -55,6 +56,13 @@ vi.mock("../src/core/writer.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/core/writer.js")>();
   return {
     ...actual,
+    // First called by snapshotState, after every checkpoint is written.
+    assertManagedTargetMatchesRegistry: async (
+      ...args: Parameters<typeof actual.assertManagedTargetMatchesRegistry>
+    ) => {
+      await fire("beforeSnapshot");
+      return actual.assertManagedTargetMatchesRegistry(...args);
+    },
     refreshManagedTargetHashes: async (
       ...args: Parameters<typeof actual.refreshManagedTargetHashes>
     ) => {
@@ -70,6 +78,7 @@ afterEach(async () => {
   hooks.afterApply = null;
   hooks.afterClearLocalBase = null;
   hooks.beforeRefresh = null;
+  hooks.beforeSnapshot = null;
   await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -226,9 +235,10 @@ describe("a native edit racing a semantic no-op", () => {
     );
     // A canonical edit after the ledger refresh fails this cycle's snapshot.
     const root = join(project.storeDir, "instructions", "root.md");
-    hooks.afterClearLocalBase = () => writeFile(root, "Edited in the store\n", "utf8");
+    hooks.beforeSnapshot = () => writeFile(root, "Edited in the store\n", "utf8");
 
-    await reconcileOnce(project).catch(() => undefined);
+    const first = await reconcileOnce(project).catch((error: Error) => error);
+    expect(first).toBeInstanceOf(Error);
     const next = await reconcileOnce(project);
 
     expect(next.conflict?.message).toBeUndefined();
@@ -260,7 +270,7 @@ describe("a native edit racing a semantic no-op", () => {
     // Same frontmatter, keys reordered: a semantic no-op.
     await writeFile(shared, "---\ndescription: Demo\nname: demo\n---\nBody\n");
     const canonicalRoot = join(project.storeDir, "instructions", "root.md");
-    hooks.afterClearLocalBase = () => writeFile(canonicalRoot, "Edited in the store\n", "utf8");
+    hooks.beforeSnapshot = () => writeFile(canonicalRoot, "Edited in the store\n", "utf8");
 
     const first = await reconcileOnce(project).catch((error: Error) => error);
     expect(first).toBeInstanceOf(Error);
@@ -269,6 +279,35 @@ describe("a native edit racing a semantic no-op", () => {
     expect(next.conflict?.message).toBeUndefined();
     expect(next.action).toBe("projected-canonical");
     expect((await reconcileOnce(project)).action).toBe("noop");
+  });
+
+  it("does not bring back a removed takeover-only value when canonical changes mid-refresh", async () => {
+    const { project, settingsPath } = await fixture({ permissions: { allow: ["Read"] } });
+    // A value only the machine-local takeover base holds; projection merges it in.
+    const base = join(project.storeDir, ".local", "preserved", "claude-settings.json");
+    await mkdir(dirname(base), { recursive: true });
+    await writeFile(base, JSON.stringify({ localOnly: "machine-value" }), "utf8");
+    const harness = await loadHarness(project.storeDir);
+    harness.metadata.description = "force a projection";
+    await writeHarness(project.storeDir, harness);
+    expect((await reconcileOnce(project)).action).toBe("projected-canonical");
+    expect(JSON.parse(await readFile(settingsPath, "utf8")).localOnly).toBe("machine-value");
+
+    // The user deletes it by hand, which is a semantic no-op against canonical...
+    const edited = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>;
+    delete edited.localOnly;
+    await writeFile(settingsPath, JSON.stringify(edited), "utf8");
+    // ...while a canonical edit lands during the ownership-ledger refresh.
+    const root = join(project.storeDir, "instructions", "root.md");
+    hooks.beforeRefresh = () => writeFile(root, "Edited in the store\n", "utf8");
+
+    await reconcileOnce(project).catch(() => undefined);
+    const later = [];
+    for (let cycle = 0; cycle < 3; cycle += 1) later.push((await reconcileOnce(project)).action);
+
+    expect(JSON.parse(await readFile(settingsPath, "utf8")).localOnly).toBeUndefined();
+    expect(await readFile(root, "utf8")).toBe("Edited in the store\n");
+    expect(later.at(-1)).toBe("noop");
   });
 
   it("does not advance the ownership ledger past what was verified", async () => {
