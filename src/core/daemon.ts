@@ -103,6 +103,29 @@ export function classifyWatchError(error: unknown): "path" | "fatal" {
   return typeof code === "string" && PATH_SCOPED_WATCH_CODES.has(code) ? "path" : "fatal";
 }
 
+/**
+ * Close a chokidar watcher and keep absorbing its errors afterwards.
+ *
+ * close() strips every listener at once, but chokidar can still have a stat()
+ * or realpath() in flight, and its _handleError emits "error" whatever the
+ * closed flag says. An "error" event with no listener throws, and here it
+ * throws inside a promise nobody awaits: Node ends the whole process, which
+ * takes every other controller of the fleet down with it. Measured with a
+ * held stat() on a symlink loop (ELOOP) after a fatal EMFILE, and after an
+ * abort during the initial scan. The sink goes on AFTER close(), since close()
+ * would remove it along with the rest.
+ */
+export async function closeWatcher(watcher: FSWatcher): Promise<void> {
+  const closing = watcher.close();
+  watcher.on("error", ignoreErrorAfterClose);
+  await closing;
+}
+
+function ignoreErrorAfterClose(): void {
+  // The controller that owned this watcher has already stopped or restarted
+  // with a fresh one; nothing is left to act on the error.
+}
+
 export async function watchProject(
   project: LoadedProject,
   options: WatchOptions = {},
@@ -317,7 +340,7 @@ export async function watchProject(
     if (timer) clearTimeout(timer);
     options.signal?.removeEventListener("abort", onAbort);
     try {
-      if (watcher) await watcher.close();
+      if (watcher) await closeWatcher(watcher);
       if (activeRun) await activeRun;
     } finally {
       if (release) await release();

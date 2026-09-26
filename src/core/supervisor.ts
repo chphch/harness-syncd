@@ -25,7 +25,7 @@ import {
 } from "./project.js";
 import { reconcileOnce, type ReconcileResult } from "./reconcile.js";
 import { readState } from "./state.js";
-import { watchProject } from "./daemon.js";
+import { closeWatcher, watchProject } from "./daemon.js";
 
 export type ControllerPlanIntent = "sync" | "watch";
 
@@ -607,7 +607,7 @@ export async function watchAllControllers(
     await Promise.allSettled(children);
     options.signal?.removeEventListener("abort", onExternalAbort);
     try {
-      if (controlWatcher) await controlWatcher.close();
+      if (controlWatcher) await closeWatcher(controlWatcher);
     } finally {
       if (release) await release();
     }
