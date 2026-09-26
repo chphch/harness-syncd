@@ -216,6 +216,61 @@ describe("a native edit racing a committed inverse capture", () => {
 });
 
 describe("a native edit racing a semantic no-op", () => {
+  it("keeps the ledger and state paired when the snapshot then fails", async () => {
+    const settings = { permissions: { deny: ["Write"], allow: ["Read"] } };
+    const { project, settingsPath } = await fixture(settings);
+    await writeFile(
+      settingsPath,
+      '{\n  "permissions": {\n    "allow": ["Read"],\n    "deny": ["Write"]\n  }\n}\n',
+      "utf8",
+    );
+    // A canonical edit after the ledger refresh fails this cycle's snapshot.
+    const root = join(project.storeDir, "instructions", "root.md");
+    hooks.afterClearLocalBase = () => writeFile(root, "Edited in the store\n", "utf8");
+
+    await reconcileOnce(project).catch(() => undefined);
+    const next = await reconcileOnce(project);
+
+    expect(next.conflict?.message).toBeUndefined();
+    expect(next.action).toBe("projected-canonical");
+    expect(await readFile(root, "utf8")).toBe("Edited in the store\n");
+    expect((await reconcileOnce(project)).action).toBe("noop");
+  });
+
+  it("does not strand a co-owner of the reformatted path when the snapshot fails", async () => {
+    // Codex and Antigravity both own .agents/skills/<name>; a reformat there
+    // changes both targets, and only one of them is the capture source.
+    const root = await mkdtemp(join(tmpdir(), "harness-sync-shared-noop-"));
+    roots.push(root);
+    const skill = join(root, ".claude", "skills", "demo");
+    await mkdir(skill, { recursive: true });
+    await writeFile(join(root, "CLAUDE.md"), "Instructions\n", "utf8");
+    await writeFile(join(skill, "SKILL.md"), "---\nname: demo\ndescription: Demo\n---\nBody\n");
+    const project = await initializeProject(root);
+    project.config.sync.linkMode = "copy";
+    await migrateFrom(project, "claude", {
+      apply: true,
+      install: true,
+      includeLocal: false,
+      force: true,
+      excludeSkills: [],
+    });
+    expect((await reconcileOnce(project)).action).toBe("noop");
+    const shared = join(root, ".agents", "skills", "demo", "SKILL.md");
+    // Same frontmatter, keys reordered: a semantic no-op.
+    await writeFile(shared, "---\ndescription: Demo\nname: demo\n---\nBody\n");
+    const canonicalRoot = join(project.storeDir, "instructions", "root.md");
+    hooks.afterClearLocalBase = () => writeFile(canonicalRoot, "Edited in the store\n", "utf8");
+
+    const first = await reconcileOnce(project).catch((error: Error) => error);
+    expect(first).toBeInstanceOf(Error);
+    const next = await reconcileOnce(project);
+
+    expect(next.conflict?.message).toBeUndefined();
+    expect(next.action).toBe("projected-canonical");
+    expect((await reconcileOnce(project)).action).toBe("noop");
+  });
+
   it("does not advance the ownership ledger past what was verified", async () => {
     const settings = { permissions: { deny: ["Write"], allow: ["Read"] } };
     const { project, settingsPath } = await fixture(settings);

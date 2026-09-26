@@ -257,29 +257,42 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
         );
       }
       // From here the ledger records the verified content, so every exit
-      // must persist a state pairing it with that content's fingerprint. A
+      // must leave a state pairing it with that content's fingerprint. A
       // ledger ahead of the state reads, next cycle, as a changed target with
-      // no changed path: a permanent "concurrent edits" conflict. An edit that
-      // lands after this point is not adopted: the ledger still differs from
-      // it, so the next cycle sees it.
+      // no changed path: a permanent "concurrent edits" conflict. So the
+      // refresh is checkpointed at once. Nothing was projected and canonical
+      // is unchanged on this path (canonicalHash is previous.canonicalHash),
+      // so the checkpoint moves only the source. A co-owner of the same
+      // shared paths (Codex and Antigravity) changed too but has no captured
+      // fingerprint of its own: it is left out, so an interrupted cycle
+      // re-projects it as a new target instead of reading it as changed with
+      // no changed path. An edit that lands after this point is not adopted:
+      // the ledger still differs from it, so the next cycle sees it.
       await refreshManagedTargetHashes(project.storeDir, source, sourcePathHashes);
+      const checkpoint = nextState(
+        previous,
+        previous.canonicalHash,
+        {
+          ...Object.fromEntries(
+            Object.entries(previous.targetHashes).filter(
+              ([target]) => !changedTargets.includes(target as TargetName),
+            ),
+          ),
+          ...capturedSource,
+        },
+        source,
+      );
+      await writeState(project.storeDir, checkpoint);
       if (
         (await hashCanonical(project, harness)) !== canonicalHash ||
         (await hashPath(project.configPath)) !== controllerHash
       ) {
-        // The previous canonical hash keeps the concurrent canonical edit
-        // visible, so the next cycle projects it (or reports a conflict if
-        // the source moved too) instead of it being absorbed here.
-        const paired = nextState(
-          previous,
-          previous.canonicalHash,
-          { ...previous.targetHashes, ...capturedSource },
-          source,
-        );
-        await writeState(project.storeDir, paired);
+        // The checkpoint keeps the previous canonical hash, so this
+        // concurrent canonical edit is projected next cycle (or reported as a
+        // conflict if the source moved too) instead of being absorbed here.
         return recordConflict(
           project,
-          paired,
+          checkpoint,
           true,
           changedTargets,
           "Canonical configuration changed while ownership hashes were refreshed; the next reconcile projects it",
@@ -289,7 +302,7 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
       const state = await snapshotState(
         project,
         harness,
-        previous,
+        checkpoint,
         source,
         canonicalHash,
         capturedSource,
