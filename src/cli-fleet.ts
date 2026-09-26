@@ -18,6 +18,7 @@ export async function superviseFleet(options: {
   health: FleetHealthRecorder;
   onEvent: (event: FleetWatchEvent) => void;
   restartPolicy?: Partial<RestartPolicy>;
+  deferWatcherClose?: (close: () => Promise<void>) => void;
 }): Promise<void> {
   let exit: FleetExit = { code: 1, error: "watch --all ended without an outcome" };
   try {
@@ -25,6 +26,7 @@ export async function superviseFleet(options: {
       registryPath: options.registryPath,
       signal: options.signal,
       ...(options.restartPolicy ? { restartPolicy: options.restartPolicy } : {}),
+      ...(options.deferWatcherClose ? { deferWatcherClose: options.deferWatcherClose } : {}),
       onEvent: (event) => {
         options.health.observe(event);
         options.onEvent(event);

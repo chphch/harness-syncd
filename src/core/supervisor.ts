@@ -37,7 +37,12 @@ import {
   type ReconcileResult,
 } from "./reconcile.js";
 import { readState } from "./state.js";
-import { closeWatcher, watchProject, type WatchErrorKind } from "./daemon.js";
+import {
+  closeWatcher,
+  leaveWatcherOpen,
+  watchProject,
+  type WatchErrorKind,
+} from "./daemon.js";
 
 export type ControllerPlanIntent = "sync" | "watch";
 
@@ -210,6 +215,12 @@ export interface WatchAllOptions {
   onEvent?: (event: FleetWatchEvent) => void;
   /** Overrides for DEFAULT_RESTART_POLICY; tests shrink the delays. */
   restartPolicy?: Partial<RestartPolicy>;
+  /**
+   * Leave every watcher open when the fleet stops and hand its close here
+   * instead (daemon.ts leaveWatcherOpen): for a caller that exits right after,
+   * so that a stop finishes in milliseconds rather than tens of seconds.
+   */
+  deferWatcherClose?: (close: () => Promise<void>) => void;
 }
 
 /**
@@ -620,6 +631,9 @@ export async function watchAllControllers(
               lock: false,
               signal: childController.signal,
               expectedConfigSnapshot: controller.configSnapshot,
+              ...(options.deferWatcherClose
+                ? { deferWatcherClose: options.deferWatcherClose }
+                : {}),
               onResult: (result) => options.onEvent?.({ type: "result", ...base, result }),
               onWarning: (warning) =>
                 options.onEvent?.({
@@ -733,7 +747,12 @@ export async function watchAllControllers(
     await Promise.allSettled(children);
     options.signal?.removeEventListener("abort", onExternalAbort);
     try {
-      if (controlWatcher) await closeWatcher(controlWatcher);
+      if (controlWatcher) {
+        // Cheap on its own, but every close rebuilds the FSEvents stream from
+        // all paths still open, including the controllers' deferred ones.
+        if (options.deferWatcherClose) options.deferWatcherClose(leaveWatcherOpen(controlWatcher));
+        else await closeWatcher(controlWatcher);
+      }
     } finally {
       if (release) await release();
     }

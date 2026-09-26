@@ -404,6 +404,12 @@ program
     const signals = processAbortController();
     const stderr = (text: string) => process.stderr.write(text);
     const notice = createFleetNoticeWriter(stderr);
+    // Watchers left open by a stop (daemon.ts leaveWatcherOpen): closing them
+    // takes tens of seconds for a large store, and the process exits instead.
+    const openWatchers: Array<() => Promise<void>> = [];
+    const deferWatcherClose = (close: () => Promise<void>) => {
+      openWatchers.push(close);
+    };
     try {
       if (options.all) {
         printEvent({ watching: "all", registry: registryPath() });
@@ -420,6 +426,7 @@ program
           registryPath: registryPath(),
           signal: signals.controller.signal,
           health,
+          deferWatcherClose,
           onEvent: (event) => {
             notice(event);
             if (event.type !== "result" || event.result.action !== "noop") {
@@ -440,6 +447,7 @@ program
         };
         await watchProject(project, {
           signal: signals.controller.signal,
+          deferWatcherClose,
           onResult: (result) => {
             notice({ type: "result", ...base, result });
             if (result.action !== "noop") print(result);
@@ -473,6 +481,10 @@ program
     } finally {
       signals.dispose();
     }
+    // Everything the stop has to do is done: the store locks are released,
+    // the stop is recorded and logged. Only the watchers remain, and they
+    // would keep the process alive until closed.
+    if (openWatchers.length > 0) await exitLeavingWatchersOpen();
   });
 
 program
@@ -836,6 +848,16 @@ function processAbortController(): {
       process.removeListener("SIGTERM", stop);
     },
   };
+}
+
+/** Exit with process.exitCode once stdout and stderr have been written out. */
+async function exitLeavingWatchersOpen(): Promise<never> {
+  const drained = (stream: NodeJS.WriteStream) =>
+    new Promise<void>((resolvePromise) => {
+      stream.write("", () => resolvePromise());
+    });
+  await Promise.all([drained(process.stdout), drained(process.stderr)]);
+  process.exit();
 }
 
 function printFleetWatchEvent(event: FleetWatchEvent): void {

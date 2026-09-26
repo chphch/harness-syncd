@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { writeProjectConfig } from "../src/core/config.js";
 import { watchProject, type WatchWarning } from "../src/core/daemon.js";
+import { pathExists } from "../src/core/fs.js";
 import { initializeProject, type LoadedProject } from "../src/core/project.js";
 
 /**
@@ -146,5 +147,61 @@ describe("watch startup", () => {
     expect(settled).toMatch(/^rejected: EMFILE/u);
     expect(run.errors).toEqual([expect.stringMatching(/^EMFILE/u)]);
     expect(watcher.closed).toBe(true);
+  });
+});
+
+describe("a stop that leaves the watcher open", () => {
+  // Closing a real watcher costs O(n²) in watched directories on macOS, so a
+  // process that exits right after its stop takes the close as a callback.
+  function startDeferring(project: LoadedProject) {
+    const abort = new AbortController();
+    const deferred: Array<() => Promise<void>> = [];
+    let results = 0;
+    const outcome = watchProject(project, {
+      signal: abort.signal,
+      deferWatcherClose: (close) => deferred.push(close),
+      onResult: () => {
+        results += 1;
+      },
+    }).then(
+      () => "resolved" as const,
+      (error: unknown) => `rejected: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { abort, deferred, outcome, results: () => results };
+  }
+
+  it("hands the close over on abort, detached, with the store lock released", async () => {
+    const project = await quietController();
+    const run = startDeferring(project);
+    const watcher = await currentWatcher();
+    watcher.emit("ready");
+    for (let attempt = 0; attempt < 200 && run.results() === 0; attempt += 1) await sleep(10);
+
+    run.abort.abort();
+    expect(await run.outcome).toBe("resolved");
+    expect(watcher.closed).toBe(false);
+    expect(run.deferred).toHaveLength(1);
+    expect(await pathExists(join(project.storeDir, ".lock"))).toBe(false);
+    // Detached: a late change schedules nothing, a late error is absorbed.
+    const cycles = run.results();
+    watcher.emit("all", "change", join(project.storeDir, "harness.yaml"));
+    expect(() => watcher.emit("error", new Error("late stat failure"))).not.toThrow();
+    await sleep(project.config.sync.debounceMs + 100);
+    expect(run.results()).toBe(cycles);
+
+    await run.deferred[0]!();
+    expect(watcher.closed).toBe(true);
+  });
+
+  it("still closes at once when the loop fails without an abort, since a restart follows", async () => {
+    const project = await quietController();
+    const run = startDeferring(project);
+    const watcher = await currentWatcher();
+    await sleep(20);
+
+    watcher.emit("error", watchError("EMFILE", "watch", "/abs/one-too-many"));
+    expect(await run.outcome).toMatch(/^rejected: EMFILE/u);
+    expect(watcher.closed).toBe(true);
+    expect(run.deferred).toEqual([]);
   });
 });

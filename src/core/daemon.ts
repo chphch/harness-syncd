@@ -33,6 +33,12 @@ export interface WatchOptions {
   lock?: boolean;
   /** Stable config bytes captured by a fleet preflight. */
   expectedConfigSnapshot?: string;
+  /**
+   * When the loop ends because `signal` aborted, hand the watcher's close to
+   * this callback instead of awaiting it. The watcher is detached first, so
+   * it can no longer schedule anything. See leaveWatcherOpen.
+   */
+  deferWatcherClose?: (close: () => Promise<void>) => void;
 }
 
 export interface WatchWarning {
@@ -132,6 +138,29 @@ export async function closeWatcher(watcher: FSWatcher): Promise<void> {
 function ignoreErrorAfterClose(): void {
   // The controller that owned this watcher has already stopped or restarted
   // with a fresh one; nothing is left to act on the error.
+}
+
+/**
+ * Detach a watcher without closing it, and return its close for later.
+ *
+ * Closing costs O(n²) in watched directories on macOS: chokidar calls
+ * fs.watch once per directory, libuv backs every directory handle with one
+ * shared FSEvents stream, and each closed handle makes the stream be rebuilt
+ * from all the paths still open — synchronously, with the event loop blocked.
+ * Measured with chokidar 5 on this box: 2 s for 500 directories, 8 s for
+ * 1,000, 41 s for 2,000; the user store took ~29 s to stop. launchd SIGKILLs a
+ * job 5 s after SIGTERM by default, so every stop through it ended before the
+ * daemon had recorded anything. A process that is about to exit need not pay
+ * for the close at all: the kernel reclaims the handles in milliseconds.
+ *
+ * Every listener goes, so nothing can schedule a cycle or report an error for
+ * a controller that has stopped, and the error sink goes on as closeWatcher
+ * does, since an in-flight stat can still emit "error".
+ */
+export function leaveWatcherOpen(watcher: FSWatcher): () => Promise<void> {
+  watcher.removeAllListeners();
+  watcher.on("error", ignoreErrorAfterClose);
+  return () => closeWatcher(watcher);
 }
 
 export async function watchProject(
@@ -349,7 +378,14 @@ export async function watchProject(
     if (timer) clearTimeout(timer);
     options.signal?.removeEventListener("abort", onAbort);
     try {
-      if (watcher) await closeWatcher(watcher);
+      if (watcher) {
+        // A restart must close now: a fresh watcher replaces this one.
+        if (options.deferWatcherClose && options.signal?.aborted) {
+          options.deferWatcherClose(leaveWatcherOpen(watcher));
+        } else {
+          await closeWatcher(watcher);
+        }
+      }
       if (activeRun) await activeRun;
     } finally {
       if (release) await release();

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createFleetNoticeWriter, formatDelay } from "../src/cli-fleet.js";
 import { writeProjectConfig } from "../src/core/config.js";
 import { readFleetHealth, type FleetHealth } from "../src/core/fleet-health.js";
+import { pathExists } from "../src/core/fs.js";
 import { migrateFrom } from "../src/core/migrate.js";
 import { initializeProject } from "../src/core/project.js";
 import { reconcileOnce } from "../src/core/reconcile.js";
@@ -286,6 +287,68 @@ describe("watch --all", () => {
     expect(finalHealth?.stoppedAt).toEqual(expect.any(String));
     expect(finalHealth?.exit).toEqual({ code: 0, signal: "SIGTERM" });
   }, 30_000);
+
+  it("finishes its stop within a service manager's exit timeout, however many directories it watches", async () => {
+    // Closing chokidar's watchers costs O(n²) in watched directories on macOS
+    // (each closed FSEvents handle reschedules the shared stream): measured
+    // 2 s for 500, 8 s for 1,000 and 41 s for 2,000, with the event loop
+    // blocked throughout. The user store took ~29 s, and launchd SIGKILLs a
+    // job 5 s after SIGTERM, so every stop ended before the stop line, the
+    // "stopped" events, the recorded stop and the lock release.
+    const root = await mkdtemp(join(tmpdir(), "hs-cli-stop-"));
+    roots.push(root);
+    const registryPath = join(root, "registry.yaml");
+    const projectRoot = join(root, "project");
+    await mkdir(projectRoot);
+    const project = await initializeProject(projectRoot, { controllerId: "wide" });
+    for (const target of Object.values(project.config.targets)) target.enabled = false;
+    await writeProjectConfig(project.configPath, project.config);
+    await addController(project.configPath, { registryPath });
+    const bulk = join(project.storeDir, ".local", "bulk");
+    for (let group = 0; group < 40; group += 1) {
+      await Promise.all(
+        Array.from({ length: 30 }, (_, index) =>
+          mkdir(join(bulk, `g${group}`, `d${index}`), { recursive: true })),
+      );
+    }
+
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx", resolve("src/cli.ts"), "--json", "--registry", registryPath, "watch", "--all"],
+      { cwd: resolve("."), stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null; at: number }>(
+      (resolvePromise) =>
+        child.once("exit", (code, signal) => resolvePromise({ code, signal, at: Date.now() })),
+    );
+    let stopRequestedAt = 0;
+    try {
+      // The first cycle runs only once the watcher is ready.
+      const deadline = Date.now() + 20_000;
+      while (!stdout.includes('"type":"result"')) {
+        if (Date.now() > deadline) throw new Error(`no first cycle within 20s; stderr: ${stderr}`);
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      }
+    } finally {
+      stopRequestedAt = Date.now();
+      child.kill("SIGTERM");
+    }
+    const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
+    const exit = await exited;
+    clearTimeout(timer);
+
+    expect({ code: exit.code, signal: exit.signal }).toEqual({ code: 0, signal: null });
+    expect(exit.at - stopRequestedAt).toBeLessThan(4_000);
+    expect(stderr).toMatch(/harness-sync: stopped by SIGTERM; exiting with status 0\n$/u);
+    const finalHealth = await readFleetHealth(registryPath);
+    expect(finalHealth?.exit).toEqual({ code: 0, signal: "SIGTERM" });
+    expect(finalHealth?.controllers.wide?.state).toBe("stopped");
+    expect(await pathExists(join(project.storeDir, ".lock"))).toBe(false);
+  }, 60_000);
 
   it("writes a persistent conflict to stderr once, and status --all reports it", async () => {
     const root = await mkdtemp(join(tmpdir(), "hs-cli-conflict-"));
