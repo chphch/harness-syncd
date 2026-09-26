@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFleetNoticeWriter, formatDelay } from "../src/cli-fleet.js";
 import { writeProjectConfig } from "../src/core/config.js";
+import { readFleetHealth, type FleetHealth } from "../src/core/fleet-health.js";
 import { migrateFrom } from "../src/core/migrate.js";
 import { initializeProject } from "../src/core/project.js";
 import { reconcileOnce } from "../src/core/reconcile.js";
@@ -22,6 +23,19 @@ afterEach(() => {
   // rm -rf: the end-to-end fixture is deeper than PATH_MAX.
   for (const root of roots.splice(0)) execFileSync("rm", ["-rf", root]);
 });
+
+async function waitForHealth(
+  registryPath: string,
+  predicate: (health: FleetHealth) => boolean,
+): Promise<FleetHealth> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const health = await readFleetHealth(registryPath);
+    if (health && predicate(health)) return health;
+    if (Date.now() > deadline) throw new Error(`fleet health never matched: ${JSON.stringify(health)}`);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+}
 
 const T0 = Date.parse("2026-09-26T10:00:00.000Z");
 
@@ -223,6 +237,7 @@ describe("watch --all", () => {
     const exited = new Promise<number | null>((resolvePromise) =>
       child.once("exit", (code) => resolvePromise(code)),
     );
+    let healthWhileRunning: FleetHealth | undefined;
     try {
       await new Promise<void>((resolvePromise, reject) => {
         const timer = setTimeout(
@@ -237,6 +252,8 @@ describe("watch --all", () => {
           }
         });
       });
+      healthWhileRunning = await waitForHealth(registryPath, (health) =>
+        health.controllers.deep?.state === "restarting");
     } finally {
       child.kill("SIGTERM");
     }
@@ -261,6 +278,12 @@ describe("watch --all", () => {
         at: expect.stringMatching(new RegExp(`^${stamp}$`, "u")),
       }),
     );
+    expect(healthWhileRunning).toMatchObject({
+      pid: child.pid,
+      controllers: { deep: { state: "restarting", attempt: 1, error: expect.stringMatching(/^ENAMETOOLONG/u) } },
+    });
+    const finalHealth = await readFleetHealth(registryPath);
+    expect(finalHealth?.stoppedAt).toEqual(expect.any(String));
   }, 30_000);
 
   it("writes a persistent conflict to stderr once, and status --all reports it", async () => {
@@ -315,6 +338,7 @@ describe("watch --all", () => {
 
     expect(await exited).toBe(0);
     expect(stderr.match(/controller stuck sync conflict: Concurrent canonical\/native/gu)).toHaveLength(1);
+    expect(status?.daemon.running).toBe(true);
     expect(status?.summary.degraded).toBe(1);
     expect(status?.controllers[0]).toMatchObject({ id: "stuck", status: "conflict" });
   }, 30_000);

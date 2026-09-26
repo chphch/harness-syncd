@@ -9,6 +9,12 @@ import {
 } from "./fs.js";
 import { getGitStatus } from "./git.js";
 import {
+  controllerHealthProblem,
+  fleetHealthIsLive,
+  readFleetHealth,
+  type ControllerHealth,
+} from "./fleet-health.js";
+import {
   inspectControllers,
   loadRegistry,
   validateLoadedControllerTopology,
@@ -90,11 +96,21 @@ export interface ProjectStatusValue {
   state: Awaited<ReturnType<typeof readState>>;
   /** The unresolved conflict, if the last reconciliation ended in one. */
   conflict: SyncConflict | null;
+  /** What the running `watch --all` daemon reports for it, if one is running. */
+  daemon?: ControllerHealth;
   git: Awaited<ReturnType<typeof getGitStatus>>;
 }
 
 export interface FleetStatusResult {
   registry: string;
+  /** Whether a `watch --all` supervisor for this registry is running now. */
+  daemon: {
+    running: boolean;
+    pid?: number;
+    startedAt?: string;
+    updatedAt?: string;
+    stoppedAt?: string;
+  };
   topologyError?: string;
   controllers: Array<ControllerOutcome<ProjectStatusValue>>;
   summary: {
@@ -383,6 +399,8 @@ export async function statusAllControllers(
   const absoluteRegistry = resolve(registryPath);
   const registry = await loadRegistry(absoluteRegistry);
   const listed = await inspectControllers(registry);
+  const health = await readFleetHealth(absoluteRegistry);
+  const daemonRunning = health !== null && fleetHealthIsLive(health);
   let topologyError: string | undefined;
   try {
     await validateControllerTopology(registry, { registryPath: absoluteRegistry });
@@ -419,13 +437,27 @@ export async function statusAllControllers(
             value: await buildProjectStatus(entry),
           };
         }
-        const value = await buildProjectStatus(entry);
+        const daemon = daemonRunning ? health.controllers[entry.id] : undefined;
+        const value = {
+          ...(await buildProjectStatus(entry)),
+          ...(daemon ? { daemon } : {}),
+        };
         if (value.conflict) {
           return {
             id: entry.id,
             configPath: entry.config,
             status: "conflict",
             error: value.conflict.message,
+            value,
+          };
+        }
+        const problem = daemon ? controllerHealthProblem(daemon) : null;
+        if (problem) {
+          return {
+            id: entry.id,
+            configPath: entry.config,
+            status: "error",
+            error: problem,
             value,
           };
         }
@@ -451,6 +483,15 @@ export async function statusAllControllers(
   }).length + (topologyError ? 1 : 0);
   return {
     registry: absoluteRegistry,
+    daemon: health
+      ? {
+          running: daemonRunning,
+          pid: health.pid,
+          startedAt: health.startedAt,
+          updatedAt: health.updatedAt,
+          ...(health.stoppedAt ? { stoppedAt: health.stoppedAt } : {}),
+        }
+      : { running: false },
     ...(topologyError ? { topologyError } : {}),
     controllers,
     summary: {

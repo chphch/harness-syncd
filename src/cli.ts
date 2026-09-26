@@ -60,6 +60,7 @@ import { validateHarness } from "./core/validate.js";
 import { CARRY_STORE_PREFIX } from "./core/carry-entry.js";
 import { carrySummary, registerCarryCommands } from "./cli-carry.js";
 import { createFleetNoticeWriter, formatNotice } from "./cli-fleet.js";
+import { createFleetHealthRecorder, fleetHealthPath } from "./core/fleet-health.js";
 import {
   statusAllControllers,
   syncAllControllers,
@@ -407,16 +408,30 @@ program
     try {
       if (options.all) {
         printEvent({ watching: "all", registry: registryPath() });
-        await watchAllControllers({
-          registryPath: registryPath(),
-          signal: signals.controller.signal,
-          onEvent: (event) => {
-            notice(event);
-            if (event.type !== "result" || event.result.action !== "noop") {
-              printFleetWatchEvent(event);
-            }
-          },
+        const healthPath = fleetHealthPath(registryPath());
+        const health = createFleetHealthRecorder(healthPath, {
+          onWriteError: (error) =>
+            stderr(formatNotice(
+              new Date(),
+              `cannot record fleet health at ${healthPath}: ${error.message}; ` +
+                "status --all will not see this daemon's controller states",
+            )),
         });
+        try {
+          await watchAllControllers({
+            registryPath: registryPath(),
+            signal: signals.controller.signal,
+            onEvent: (event) => {
+              health.observe(event);
+              notice(event);
+              if (event.type !== "result" || event.result.action !== "noop") {
+                printFleetWatchEvent(event);
+              }
+            },
+          });
+        } finally {
+          await health.close();
+        }
       } else {
         const project = await loadProject(cwd());
         print({
