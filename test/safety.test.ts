@@ -1463,9 +1463,9 @@ describe("watcher ignores generated directories", () => {
     // Measured on this box: one skill's node_modules is 705 directories, the
     // skills tree is projected to five native roots plus the store, and the
     // user controller therefore wanted 6,265 descriptors. launchd gives a job
-    // 256. It died with EMFILE on every start while the other fourteen
-    // controllers kept running — so the daemon looked alive and one store
-    // silently stopped syncing.
+    // 256, so it failed with EMFILE on every start. An errno failure restarts
+    // only that controller with backoff while the rest of the fleet keeps
+    // running — so the daemon looks alive while one store never syncs.
     expect(isGeneratedWatchPath(join("a", "skills", "x", "node_modules", "y", "index.js")))
       .toBe(true);
     expect(isGeneratedWatchPath(join("a", "__pycache__", "m.pyc"))).toBe(true);

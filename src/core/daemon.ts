@@ -179,10 +179,13 @@ export async function watchProject(
         // directory and launchd gives a job 256 of them by default. Measured on
         // this box — one skill's node_modules is 705 directories, the skills
         // tree is projected to five native roots plus the store, and the whole
-        // user controller therefore wanted 6,265 descriptors. It died with
-        // EMFILE on every start while the other fourteen controllers kept
-        // running, so the daemon looked alive and one store silently stopped
-        // syncing.
+        // user controller therefore wanted 6,265 descriptors, and it failed
+        // with EMFILE on every start. An errno failure restarts only that
+        // controller, with backoff (supervisor.ts superviseController), so
+        // the rest of the fleet keeps running and the daemon looks alive
+        // while one store never finishes starting: the stderr restart
+        // notices are the only symptom. Keeping descriptors bounded here is
+        // what prevents it.
         //
         // A FUNCTION, not a glob: chokidar 4 removed glob support from
         // `ignored`, so `**/node_modules/**` is matched as a literal path and
@@ -190,7 +193,7 @@ export async function watchProject(
         isGeneratedWatchPath,
         // Sockets, FIFOs, devices: see isUnwatchableEntry. A Chrome profile in
         // a skill's scripts/ directory put a SingletonSocket here every day at
-        // 20:00, and the resulting watch error stopped the whole fleet.
+        // 20:00; the resulting watch error used to stop the whole fleet.
         isUnwatchableEntry,
       ],
     });

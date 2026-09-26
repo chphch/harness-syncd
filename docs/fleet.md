@@ -90,7 +90,15 @@ harness-sync watch --all
 
 `sync --all` performs a complete preflight before the first reconciliation. It requires every enabled controller to be online, validates exact byte-stable config snapshots and all known path claims, then acquires all selected store locks in sorted physical-path order. A failed preflight or lock acquisition leaves every controller untouched. Once execution starts, outcomes are reported in registry order; one controller conflict does not hide results from the others.
 
-`watch --all` selects controllers whose `enabled` and `watch` flags are both true. It uses the same topology preflight and all-lock barrier, runs the individual reconciliation loops under one abort signal, and watches the registry plus every enabled controller config. A control-file change stops the whole fleet and returns a restart-required error. This fail-closed restart model avoids partially applying a changed topology; dynamic hot reload is intentionally not part of v0.2.
+`watch --all` selects controllers whose `enabled` and `watch` flags are both true. It uses the same topology preflight and all-lock barrier, runs the individual reconciliation loops under one abort signal, and watches the registry plus every enabled controller config. A control-file change — the registry, or any enabled controller's config — stops the whole fleet and returns a restart-required error. This fail-closed restart model avoids partially applying a changed topology; dynamic hot reload is intentionally not part of v0.2.
+
+Every other failure stays inside the controller it happens in, and the rest of the fleet keeps syncing:
+
+- **A watch error on one path** — an entry the watcher cannot watch, such as a permission error on a single file — is reported as a `warning` event and that path is skipped. The watcher only buys latency: the periodic audit (`sync.auditIntervalMs`) still reconciles the skipped path. Unix sockets, FIFOs and devices are never watched at all; a socket used to raise such an error and a FIFO used to hang the process. Directory-read errors and descriptor exhaustion (`EMFILE`, `ENFILE`, `ENOSPC`) are not path-scoped: they fail the controller as below.
+- **A failure with an errno code** (`EMFILE`, `ENOSPC`, `UNKNOWN`, ...) is treated as environmental: that controller alone restarts after a backoff that starts at 10 s, doubles per consecutive failure up to 10 min, and resets after a run of 10 min. Each attempt emits a `restarting` event with the attempt number and delay.
+- **A failure without an errno code** is a programming error or an invalid controller, which retrying cannot fix. That controller is `parked`: it stays stopped for inspection, still holding its store lock, until the daemon is restarted after the fix.
+
+`restarting` and `parked` events, and the first `warning` per controller and path, are also written to stderr as one human-readable line each, for example `harness-sync: controller web-app-4f19a27c restarting in 10s (attempt 1): EMFILE: too many open files, watch '…'`. stdout keeps the JSON event stream, including these event types.
 
 `status --all` includes disabled, missing, and invalid entries. Exit status 2 means an enabled controller or the fleet topology is degraded. `sync --all` uses exit status 2 for reconciliation conflicts and 1 for operational errors.
 
@@ -108,7 +116,7 @@ Disabling or removing an entry changes only the machine registry. It does not de
 
 Run one `watch --all` supervisor per registry. Store locks prevent a second managed writer from operating on the same canonical store, but separate unregistered processes with disjoint store locks cannot know about each other's registry-wide path claims.
 
-For a login service, run the foreground command under the OS service manager and let that manager restart it after a control-file change. Do not configure immediate unlimited restart loops: a persistently invalid registry or controller should remain stopped for inspection.
+For a login service, run the foreground command under the OS service manager and let that manager restart it after a control-file change or another fleet-level failure. A failing controller no longer ends the process: it is restarted in-process or parked, so watch the daemon's stderr (or the `parked` events) rather than its exit status to notice one. Do not configure immediate unlimited restart loops: a persistently invalid registry or controller should remain stopped for inspection.
 
 ## Private Git synchronization
 
