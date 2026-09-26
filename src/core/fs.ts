@@ -757,6 +757,11 @@ async function appendPathHash(
   digest.update(`dir:${relativePath}`);
   const entries = await readdir(path, { withFileTypes: true });
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    // Never content: the importer, the watcher, validation and the Git staging
+    // all leave generated directories out. Hashed, they made running a skill's
+    // script a native change no capture could represent — a permanent conflict
+    // in copy mode — and, through a link, a canonical change every time.
+    if (isGeneratedDirectory(entry.name)) continue;
     await appendPathHash(
       digest,
       join(path, entry.name),

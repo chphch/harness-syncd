@@ -34,6 +34,7 @@ import {
   copyFileAtomicInside,
   copyTreeForImportInside,
   hashPath,
+  isGeneratedDirectory,
   isNodeError,
   pathExists,
   resolveInside,
@@ -948,11 +949,17 @@ export async function nativePathsEquivalent(
   }
   if (leftInfo.isDirectory() || rightInfo.isDirectory()) {
     if (!leftInfo.isDirectory() || !rightInfo.isDirectory()) return false;
+    // A capture never contains a generated directory (the importer skips
+    // them), so the round trip of a skill whose script ran can never
+    // reproduce its __pycache__; compared, that made every edit to such a
+    // skill "only partially representable".
+    const authoredEntries = async (directory: string) =>
+      (await readdir(directory)).filter((entry) => !isGeneratedDirectory(entry)).sort();
     const [leftEntries, rightEntries] = await Promise.all([
-      readdir(left),
-      readdir(right),
+      authoredEntries(left),
+      authoredEntries(right),
     ]);
-    if (stableStringify(leftEntries.sort()) !== stableStringify(rightEntries.sort())) {
+    if (stableStringify(leftEntries) !== stableStringify(rightEntries)) {
       return false;
     }
     for (const entry of leftEntries) {
