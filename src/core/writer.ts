@@ -111,13 +111,11 @@ export class ManagedWriter {
   }
 
   async load(): Promise<void> {
-    await assertSafeStorePath(this.options.storeDir, this.registryPath);
-    try {
-      const parsed = JSON.parse(await readFile(this.registryPath, "utf8")) as ManagedRegistry;
-      if (parsed.schemaVersion === 1) this.registry = parsed;
-    } catch {
-      // A missing or malformed registry means every existing destination is unowned.
-    }
+    // A missing or malformed registry means every existing destination is
+    // unowned. One that could not be READ fails the load: this writer saves
+    // its registry at the end, which would drop every path it never saw.
+    const parsed = await readManagedRegistry(this.options.storeDir);
+    if (parsed) this.registry = parsed;
   }
 
   owns(path: string): boolean {
@@ -707,15 +705,8 @@ export async function fingerprintManagedTarget(
   storeDir: string,
   target: TargetName,
 ): Promise<string> {
-  const registryPath = join(storeDir, ".managed.json");
-  await assertSafeStorePath(storeDir, registryPath);
-  let registry: ManagedRegistry;
-  try {
-    registry = JSON.parse(await readFile(registryPath, "utf8")) as ManagedRegistry;
-  } catch {
-    return hashPaths([]);
-  }
-  if (registry.schemaVersion !== 1) return hashPaths([]);
+  const registry = await readManagedRegistry(storeDir);
+  if (!registry) return hashPaths([]);
   const owned = new Set(
     Object.entries(registry.owners ?? {})
       .filter(([, owner]) =>
@@ -915,14 +906,27 @@ export async function assertManagedTargetMatchesRegistry(
   }
 }
 
+/**
+ * The ownership ledger, or null when there is none: missing, not JSON, or of
+ * another schema. Any other read failure is thrown. It used to read as "owns
+ * nothing" as well, and an EMFILE then made every target's fingerprint the
+ * empty set — a changed target with no changed path, i.e. a spurious conflict
+ * — while a writer that loaded nothing saved a ledger without the paths it
+ * never saw.
+ */
 async function readManagedRegistry(storeDir: string): Promise<ManagedRegistry | null> {
   const path = join(storeDir, ".managed.json");
   await assertSafeStorePath(storeDir, path);
+  let raw: string;
   try {
-    const registry = JSON.parse(
-      await readFile(path, "utf8"),
-    ) as ManagedRegistry;
-    return registry.schemaVersion === 1 ? registry : null;
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const registry = JSON.parse(raw) as ManagedRegistry | null;
+    return registry?.schemaVersion === 1 ? registry : null;
   } catch {
     return null;
   }
