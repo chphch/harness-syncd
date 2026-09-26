@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
 import { getAdapter } from "../adapters/index.js";
@@ -29,6 +30,25 @@ export interface WatchOptions {
  */
 export function isGeneratedWatchPath(candidate: string): boolean {
   return candidate.split(sep).some((segment) => isGeneratedDirectory(segment));
+}
+
+/**
+ * Whether chokidar's stats say this entry can never be watched: a socket, a
+ * FIFO, or a device. chokidar calls `ignored` up to three times per entry —
+ * without stats, with the lstat stats readdirp produced, and with FOLLOWED
+ * stats just before it calls fs.watch — so `undefined` means "not decidable
+ * yet", never "skip". A symlink is kept at the lstat stage because the daemon's
+ * own managed projections are symlinks; the followed stats then decide what
+ * the link points at.
+ *
+ * Measured on macOS (node 26): fs.watch on a socket throws
+ * `UNKNOWN: unknown error, watch` (errno -102, EOPNOTSUPP, which libuv has no
+ * name for), and on a FIFO it blocks the whole event loop in open() until a
+ * writer appears — a hang with no error at all.
+ */
+export function isUnwatchableEntry(_candidate: string, stats?: Stats): boolean {
+  if (stats === undefined) return false;
+  return !stats.isFile() && !stats.isDirectory() && !stats.isSymbolicLink();
 }
 
 export async function watchProject(
@@ -116,6 +136,10 @@ export async function watchProject(
         // `ignored`, so `**/node_modules/**` is matched as a literal path and
         // silently ignores nothing.
         isGeneratedWatchPath,
+        // Sockets, FIFOs, devices: see isUnwatchableEntry. A Chrome profile in
+        // a skill's scripts/ directory put a SingletonSocket here every day at
+        // 20:00, and the resulting watch error stopped the whole fleet.
+        isUnwatchableEntry,
       ],
     });
 
