@@ -55,6 +55,7 @@ import { driftedManagedPaths } from "./core/writer.js";
 import { validateHarness } from "./core/validate.js";
 import { CARRY_STORE_PREFIX } from "./core/carry-entry.js";
 import { carrySummary, registerCarryCommands } from "./cli-carry.js";
+import { createFleetNoticeWriter, createWarningNoticeWriter } from "./cli-fleet.js";
 import {
   statusAllControllers,
   syncAllControllers,
@@ -400,10 +401,12 @@ program
     try {
       if (options.all) {
         printEvent({ watching: "all", registry: registryPath() });
+        const notice = createFleetNoticeWriter((text) => process.stderr.write(text));
         await watchAllControllers({
           registryPath: registryPath(),
           signal: signals.controller.signal,
           onEvent: (event) => {
+            notice(event);
             if (event.type !== "result" || event.result.action !== "noop") {
               printFleetWatchEvent(event);
             }
@@ -422,6 +425,7 @@ program
           if (result.action !== "noop") print(result);
         },
         onError: (error) => process.stderr.write(`${error.message}\n`),
+        onWarning: createWarningNoticeWriter((text) => process.stderr.write(text)),
       });
     } finally {
       signals.dispose();
