@@ -19,6 +19,7 @@ const hooks = vi.hoisted(() => ({
   afterClearLocalBase: null as null | (() => Promise<void>),
   beforeRefresh: null as null | (() => Promise<void>),
   beforeSnapshot: null as null | (() => Promise<void>),
+  duringCommit: null as null | (() => Promise<void>),
 }));
 
 async function fire(name: keyof typeof hooks): Promise<void> {
@@ -52,6 +53,21 @@ vi.mock("../src/core/local-base.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../src/core/fs.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/core/fs.js")>();
+  return {
+    ...actual,
+    // commitCaptureStage copies each captured path to a `.capture` sibling
+    // before installing it: past its baseline checks, before its final one.
+    copyFileAtomicInside: async (
+      ...args: Parameters<typeof actual.copyFileAtomicInside>
+    ) => {
+      await actual.copyFileAtomicInside(...args);
+      if (args[2].endsWith(".capture")) await fire("duringCommit");
+    },
+  };
+});
+
 vi.mock("../src/core/writer.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/core/writer.js")>();
   return {
@@ -79,6 +95,7 @@ afterEach(async () => {
   hooks.afterClearLocalBase = null;
   hooks.beforeRefresh = null;
   hooks.beforeSnapshot = null;
+  hooks.duringCommit = null;
   await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -221,6 +238,47 @@ describe("a native edit racing a committed inverse capture", () => {
     // The state pairs the committed canonical revision with the fingerprint of
     // the CAPTURED content, which is what makes the newer edit visible.
     expect((await readState(project.storeDir))?.lastWriter).toBe("claude");
+  });
+});
+
+describe("a canonical edit racing the capture commit", () => {
+  it("self-heals when another canonical file changes while the capture is committed", async () => {
+    // Every captured path is installed by the time the commit's closing check
+    // sees the store differ, so the capture is in canonical: state must follow.
+    const { project, settingsPath } = await fixture({ permissions: { allow: ["Read"] } }, "copy");
+    const root = join(project.storeDir, "instructions", "root.md");
+    await writeFile(settingsPath, JSON.stringify(EDIT), "utf8");
+    hooks.duringCommit = () => writeFile(root, "Edited in the store\n", "utf8");
+
+    await reconcileOnce(project).catch(() => undefined);
+    const next = await reconcileOnce(project);
+
+    expect(next.conflict?.message).toBeUndefined();
+    expect(next.action).toBe("projected-canonical");
+    expect(await allowList(project)).toContain("Bash(pnpm test)");
+    expect(await readFile(join(project.projectRoot, "CLAUDE.md"), "utf8"))
+      .toBe("Edited in the store\n");
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(EDIT);
+    expect((await reconcileOnce(project)).action).toBe("noop");
+  });
+
+  it("records a conflict instead of reverting the native edit when a captured path is rewritten", async () => {
+    // An editor holding a stale harness.yaml saves right after the commit:
+    // both sides edited the same content, so neither may silently win.
+    const { project, settingsPath } = await fixture({ permissions: { allow: ["Read"] } }, "copy");
+    const harnessYaml = join(project.storeDir, "harness.yaml");
+    const stale = await readFile(harnessYaml, "utf8");
+    await writeFile(settingsPath, JSON.stringify(EDIT), "utf8");
+    hooks.afterClearLocalBase = () => writeFile(harnessYaml, `${stale}\n`, "utf8");
+
+    const first = await reconcileOnce(project);
+    expect(first.action).toBe("conflict");
+    expect(first.conflict?.message).toMatch(/harness\.yaml/u);
+    const next = await reconcileOnce(project);
+
+    expect(next.action).toBe("conflict");
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(EDIT);
+    expect(await readFile(harnessYaml, "utf8")).toBe(`${stale}\n`);
   });
 });
 

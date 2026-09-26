@@ -335,6 +335,7 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
     const stageDir = await createCaptureStage(project.storeDir, harness);
     let captured: CaptureResult;
     let stagedContentHash: string;
+    let installed: ReadonlyMap<string, string>;
     try {
       captured = await adapter.capture(
         harness,
@@ -405,13 +406,23 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
       }
 
       try {
-        await commitCaptureStage(
-          project,
-          harness,
-          captured.harness,
-          stageDir,
-          canonicalHash,
-        );
+        try {
+          installed = await commitCaptureStage(
+            project,
+            harness,
+            captured.harness,
+            stageDir,
+            canonicalHash,
+          );
+        } catch (error) {
+          // Every captured path was installed; only the commit's closing check
+          // saw the store differ from the stage. The capture IS in canonical
+          // now, so reporting a conflict against `previous` would strand
+          // canonical ahead of state for good. Carry on as committed and let
+          // the checks below decide what that other change was.
+          if (!(error instanceof CaptureCommitUnverifiedError)) throw error;
+          installed = error.installed;
+        }
         await clearPreservedLocalBase(project.storeDir, source);
       } catch (error) {
         return recordConflict(
@@ -442,7 +453,6 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
     // native-only change and is captured; nothing newer is adopted unseen.
     // The other targets are left out of the checkpoint, so a cycle that stops
     // before projecting them re-projects them as new targets.
-    await refreshManagedTargetHashes(project.storeDir, source, sourcePathHashes);
     const capturedCanonicalHash = await hashCanonical(project, harness);
     // Checked AFTER hashing: the controller config and the store content both
     // still being exactly what was committed proves the hash does not include
@@ -451,6 +461,25 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
     const canonicalIsCapture =
       (await hashPath(project.configPath)) === controllerHash &&
       (await hashCanonicalContent(project.storeDir, harness)) === stagedContentHash;
+    // Read last, so a rewrite that the content check above saw is seen here
+    // too. A concurrent write to a path the capture itself installed means
+    // both sides edited the same content — typically an editor saving a stale
+    // copy of harness.yaml. Projecting canonical next cycle would silently
+    // revert the native edit (it would survive only in backups/), so this is
+    // a real conflict: state and ledger stay where they were, the native edit
+    // stays in the source and the rewrite stays in canonical.
+    const rewritten = canonicalIsCapture ? [] : await rewrittenCapturePaths(project.storeDir, installed);
+    if (rewritten.length > 0) {
+      return recordConflict(
+        project,
+        previous,
+        true,
+        changedTargets,
+        `${source} was captured, but ${rewritten.join(", ")} changed again in the canonical store while the capture was committed; ` +
+          `the native edit was kept in ${source} and the canonical rewrite in the store — resolve with an explicit import or apply --force`,
+      );
+    }
+    await refreshManagedTargetHashes(project.storeDir, source, sourcePathHashes);
     const checkpoint = nextState(
       previous,
       // Otherwise keep the previous hash, so the next cycle sees canonical as
@@ -466,7 +495,7 @@ async function reconcileUnlocked(project: LoadedProject): Promise<ReconcileResul
         checkpoint,
         true,
         changedTargets,
-        "Canonical configuration changed during inverse capture; the capture was kept and the next reconcile projects both",
+        "The canonical store or controller config changed while the inverse capture was committed; the capture stayed in canonical and the next reconcile projects it together with that change",
       );
     }
     const applyResults = await applyHarness(project, harness, {
@@ -567,6 +596,25 @@ export async function createCaptureStage(
   }
 }
 
+/**
+ * Thrown by commitCaptureStage when every captured path was installed but the
+ * closing check found the store no longer matching the stage: some other
+ * canonical write landed during the commit. Unlike every earlier failure, the
+ * capture is already in canonical; `installed` maps each path it wrote to the
+ * staged content hash, so the caller can tell whether that other write touched
+ * the capture's own paths.
+ */
+export class CaptureCommitUnverifiedError extends Error {
+  constructor(readonly installed: ReadonlyMap<string, string>) {
+    super("canonical content changed while the staged capture was being committed");
+    this.name = "CaptureCommitUnverifiedError";
+  }
+}
+
+/**
+ * Install a validated capture stage into the canonical store. Returns each
+ * path it replaced, mapped to the staged content hash it installed there.
+ */
 export async function commitCaptureStage(
   project: LoadedProject,
   original: CanonicalHarness,
@@ -574,7 +622,7 @@ export async function commitCaptureStage(
   stageDir: string,
   expectedCanonicalHash: string,
   additionalRelativePaths: readonly string[] = [],
-): Promise<void> {
+): Promise<ReadonlyMap<string, string>> {
   if ((await hashCanonical(project, original)) !== expectedCanonicalHash) {
     throw new Error("canonical content changed before the staged capture could be committed");
   }
@@ -622,10 +670,12 @@ export async function commitCaptureStage(
     }
   }
   const changedPaths: string[] = [];
+  const installed = new Map<string, string>();
   for (const relativePath of [...new Set(capturedPaths)]) {
     const stagedHash = await hashPath(resolveInside(stageDir, relativePath));
     if (baselineHashes.get(relativePath) !== stagedHash) {
       changedPaths.push(relativePath);
+      installed.set(relativePath, stagedHash);
     }
   }
   changedPaths.sort((left, right) => {
@@ -696,7 +746,7 @@ export async function commitCaptureStage(
   }
   const expectedContentHash = await hashCanonicalContent(stageDir, captured);
   if ((await hashCanonicalContent(project.storeDir, captured)) !== expectedContentHash) {
-    throw new Error("canonical content changed while the staged capture was being committed");
+    throw new CaptureCommitUnverifiedError(installed);
   }
   for (const relativePath of additionalRelativePaths) {
     if (
@@ -706,6 +756,21 @@ export async function commitCaptureStage(
       throw new Error(`local capture artifact changed while it was committed: ${relativePath}`);
     }
   }
+  return installed;
+}
+
+/** The installed capture paths whose canonical content is no longer what was staged. */
+async function rewrittenCapturePaths(
+  storeDir: string,
+  installed: ReadonlyMap<string, string>,
+): Promise<string[]> {
+  const rewritten: string[] = [];
+  for (const [relativePath, stagedHash] of installed) {
+    if ((await hashPath(resolveInside(storeDir, relativePath))) !== stagedHash) {
+      rewritten.push(relativePath);
+    }
+  }
+  return rewritten.sort();
 }
 
 async function copyCanonicalArtifact(
