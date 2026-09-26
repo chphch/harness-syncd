@@ -115,12 +115,87 @@ export type FleetWatchEvent =
       id: string;
       configPath: string;
       error: string;
+    }
+  | {
+      /** One path this controller's watcher skipped; the audit still covers it. */
+      type: "warning";
+      id: string;
+      configPath: string;
+      path: string;
+      code?: string;
+      warning: string;
+    }
+  | {
+      /** An environmental (errno) failure; this controller restarts after delayMs. */
+      type: "restarting";
+      id: string;
+      configPath: string;
+      error: string;
+      attempt: number;
+      delayMs: number;
+    }
+  | {
+      /** A failure retrying cannot fix; this controller stays stopped. */
+      type: "parked";
+      id: string;
+      configPath: string;
+      error: string;
     };
+
+export interface RestartPolicy {
+  /** Delay before the first restart; it doubles per consecutive failure. */
+  baseMs: number;
+  /** Ceiling for the doubled delay. */
+  maxMs: number;
+  /** A run at least this long counts as healthy and resets the backoff. */
+  healthyAfterMs: number;
+}
+
+export const DEFAULT_RESTART_POLICY: RestartPolicy = {
+  baseMs: 10_000,
+  maxMs: 600_000,
+  healthyAfterMs: 600_000,
+};
 
 export interface WatchAllOptions {
   registryPath: string;
   signal?: AbortSignal;
   onEvent?: (event: FleetWatchEvent) => void;
+  /** Overrides for DEFAULT_RESTART_POLICY; tests shrink the delays. */
+  restartPolicy?: Partial<RestartPolicy>;
+}
+
+/**
+ * The marker daemon.ts restartError() writes when a controller's config
+ * changed. Only a fresh plan can load new roots and policy, so this failure
+ * still stops the whole fleet for the service manager to restart.
+ */
+const FLEET_RESTART_MARKER = "restart harness-sync watch";
+
+/**
+ * An errno-style code (EMFILE, ENOSPC, UNKNOWN, ...) marks an environmental
+ * failure that may clear by itself, so it is retried. Node's own `ERR_*`
+ * codes are programming errors and are not.
+ */
+function hasErrnoCode(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^(?:E[A-Z0-9]+|UNKNOWN)$/u.test(code);
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolvePromise) => {
+    if (signal.aborted) {
+      resolvePromise();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolvePromise();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 export async function planControllers(
@@ -433,65 +508,76 @@ export async function watchAllControllers(
           "harness-sync watch --all",
       );
     }
-    for (const controller of plan.controllers) {
-      if (options.signal?.aborted) break;
-      options.onEvent?.({
-        type: "started",
-        id: controller.id,
-        configPath: controller.configPath,
-      });
-      let fatalError: string | undefined;
-      let reportedError: string | undefined;
-      const child = watchProject(controller.project, {
-        lock: false,
-        signal: childController.signal,
-        expectedConfigSnapshot: controller.configSnapshot,
-        onResult: (result) =>
-          options.onEvent?.({
-            type: "result",
-            id: controller.id,
-            configPath: controller.configPath,
-            result,
-          }),
-        onError: (error) => {
-          reportedError = error.message;
-          options.onEvent?.({
-            type: "error",
-            id: controller.id,
-            configPath: controller.configPath,
-            error: error.message,
+    const policy: RestartPolicy = { ...DEFAULT_RESTART_POLICY, ...options.restartPolicy };
+    // Each controller runs in its own loop, so one failure no longer stops the
+    // other stores. It used to: every controller error settled the fleet, the
+    // process exited 1 and launchd respawned it — a socket in ONE project's
+    // tree took every store down daily, and every exit was one more chance
+    // for the respawn itself to fail.
+    const superviseController = async (controller: PlannedController): Promise<void> => {
+      const base = { id: controller.id, configPath: controller.configPath };
+      let attempt = 0;
+      while (!childController.signal.aborted) {
+        options.onEvent?.({ type: "started", ...base });
+        const startedAt = Date.now();
+        let reportedError: string | undefined;
+        let reloadRequired: string | undefined;
+        let failure: unknown;
+        try {
+          await watchProject(controller.project, {
+            lock: false,
+            signal: childController.signal,
+            expectedConfigSnapshot: controller.configSnapshot,
+            onResult: (result) => options.onEvent?.({ type: "result", ...base, result }),
+            onWarning: (warning) =>
+              options.onEvent?.({
+                type: "warning",
+                ...base,
+                path: warning.path,
+                ...(warning.code ? { code: warning.code } : {}),
+                warning: warning.message,
+              }),
+            onError: (error) => {
+              reportedError = error.message;
+              options.onEvent?.({ type: "error", ...base, error: error.message });
+              if (error.message.includes(FLEET_RESTART_MARKER)) reloadRequired = error.message;
+            },
           });
-          if (error.message.includes("restart harness-sync watch")) {
-            fatalError = error.message;
+          if (childController.signal.aborted) {
+            options.onEvent?.({ type: "stopped", ...base });
+            return;
           }
-        },
-      }).then(
-        () => {
-          options.onEvent?.({
-            type: "stopped",
-            id: controller.id,
-            configPath: controller.configPath,
-          });
-          settleStop?.({
-            kind: "controller",
-            id: controller.id,
-            ...(fatalError ? { error: fatalError } : {}),
-          });
-        },
-        (error: unknown) => {
+          // watchProject resolves only when aborted; anything else is a bug.
+          failure = new Error(reloadRequired ?? "watch loop ended without being stopped");
+        } catch (error) {
+          failure = error;
           const message = errorMessage(error);
           if (reportedError !== message) {
-            options.onEvent?.({
-              type: "error",
-              id: controller.id,
-              configPath: controller.configPath,
-              error: message,
-            });
+            options.onEvent?.({ type: "error", ...base, error: message });
           }
-          settleStop?.({ kind: "controller", id: controller.id, error: message });
-        },
-      );
-      children.push(child);
+          if (childController.signal.aborted) return;
+        }
+        const message = errorMessage(failure);
+        if (reloadRequired !== undefined || message.includes(FLEET_RESTART_MARKER)) {
+          settleStop?.({ kind: "controller", id: controller.id, error: reloadRequired ?? message });
+          return;
+        }
+        if (!hasErrnoCode(failure)) {
+          // Retrying cannot fix a programming error or an invalid controller.
+          // Leave it stopped for inspection; the other controllers keep going.
+          options.onEvent?.({ type: "parked", ...base, error: message });
+          return;
+        }
+        if (Date.now() - startedAt >= policy.healthyAfterMs) attempt = 0;
+        const delayMs = Math.min(policy.maxMs, policy.baseMs * 2 ** attempt);
+        attempt += 1;
+        options.onEvent?.({ type: "restarting", ...base, error: message, attempt, delayMs });
+        await abortableDelay(delayMs, childController.signal);
+      }
+    };
+    for (const controller of plan.controllers) {
+      if (options.signal?.aborted) break;
+      children.push(superviseController(controller));
     }
 
     if (options.signal?.aborted) onExternalAbort();
