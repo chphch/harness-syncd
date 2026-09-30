@@ -285,6 +285,35 @@ For exact paths, scope rules, reload behavior, and documentation discrepancies, 
 
 Read [SECURITY.md](SECURITY.md) before enabling hooks or syncing a store between machines.
 
+### Recovering from a conflict
+
+`harness-sync status` shows a `conflict` record, and the watcher logs
+`sync conflict`, when canonical and a native target both changed since the last
+recorded state. One way to get there by accident is several quick edits to one
+copied artifact in the store while the watcher is projecting the previous one:
+the interrupted projection has already written the native file but not advanced
+the state, so the next cycle sees both sides changed. Make a multi-part change
+to a copied artifact in one write.
+
+Resolving it needs the store lock, which the watcher holds for its whole
+lifetime, so stop the supervisor first — a signal stops it cleanly and releases
+the locks ([fleet.md](docs/fleet.md), Local lifecycle and recovery):
+
+```bash
+launchctl bootout gui/$(id -u)/<label>             # launchd; otherwise your service manager's stop
+harness-sync -C <controller-dir> apply --dry-run   # what projecting canonical would write
+harness-sync -C <controller-dir> apply             # canonical wins; re-baselines and clears the record
+launchctl bootstrap gui/$(id -u) <path-to-plist>   # start the supervisor again
+harness-sync -C <controller-dir> status            # no conflict record
+```
+
+Run the plain `apply` only when the dry run shows an empty `skipped` list for
+every target: every native path then still holds content harness-sync wrote, so
+nothing someone else edited is overwritten. A skipped path holds a native edit —
+keep it with an explicit `migrate --apply` of that target, or replace it with
+`apply --force`, which backs the native file up first. To see which side a
+change came from, list the native files newer than the state's `updatedAt`.
+
 ## Documentation
 
 - [Detailed architecture](docs/architecture.md)
