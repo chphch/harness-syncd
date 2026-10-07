@@ -255,7 +255,15 @@ export class ManagedWriter {
       return true;
     }
     if (!(await this.canReplace(path))) return false;
-    const observed = (await pathExists(path)) ? await hashPath(path) : null;
+    // A managed symlink being replaced by generated text (an instruction file
+    // that gained an `@path` import) has no file hash in the ledger, so
+    // acceptObservedHash would refuse it, the path would drop out of
+    // `written`, and finish() would prune the link — leaving no file at all.
+    // Clear it the way copyFileEntry does for a symlink→copy switch.
+    const wasManagedLink = await this.clearRecordedManagedLink(path);
+    const observed = !wasManagedLink && (await pathExists(path))
+      ? await hashPath(path)
+      : null;
     await this.assertNativePrecondition(path, observed);
     if (!this.acceptObservedHash(path, observed)) return false;
     this.written.push(path);
@@ -518,6 +526,20 @@ export class ManagedWriter {
    * Returns true when the destination should be treated as absent. */
   private async clearManagedLink(source: string, destination: string): Promise<boolean> {
     if (!(await this.isManagedLinkFor(source, destination))) return false;
+    if (!this.options.dryRun) {
+      await rm(destination, { force: true });
+      delete this.registry.links[destination];
+    }
+    return true;
+  }
+
+  /** Clear `destination` when it is the symlink the ledger records for it,
+   * whatever that link points at. Returns true when it should be treated as
+   * absent. */
+  private async clearRecordedManagedLink(destination: string): Promise<boolean> {
+    const recorded = this.registry.links[destination];
+    if (recorded === undefined) return false;
+    if (!(await symlinkPointsTo(destination, recorded))) return false;
     if (!this.options.dryRun) {
       await rm(destination, { force: true });
       delete this.registry.links[destination];

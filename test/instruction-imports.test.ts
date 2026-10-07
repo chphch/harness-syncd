@@ -135,6 +135,45 @@ describe("projecting instructions that import a file", () => {
       .toBe(INSTRUCTIONS);
   });
 
+  it("replaces a projected link with the rendered file when canonical gains an import", async () => {
+    // The 2026-10-07 incident: the user store projects by symlink, so adding
+    // an import line to canonical turned a managed link into generated text.
+    // The writer refused the link, finish() then pruned it, and both AGENTS.md
+    // and GEMINI.md disappeared.
+    const root = await scratch("instruction-link-to-render-");
+    await writeFile(join(root, "CLAUDE.md"), "# Instructions\n\nKeep it short.\n", "utf8");
+    await writeFile(join(root, "REQUIREMENTS.md"), REQUIREMENTS, "utf8");
+    const project = await initializeProject(root);
+    project.config.sync.linkMode = "symlink";
+    for (const target of ["claude", "codex", "antigravity"] as const) {
+      project.config.targets[target].enabled = true;
+    }
+    await writeProjectConfig(project.configPath, project.config);
+    await migrateFrom(project, "claude", {
+      apply: true,
+      install: true,
+      includeLocal: false,
+      force: true,
+      excludeSkills: [],
+    });
+    expect((await lstat(join(root, "AGENTS.md"))).isSymbolicLink()).toBe(true);
+    const canonical = join(project.storeDir, "instructions", "root.md");
+
+    await writeFile(canonical, INSTRUCTIONS, "utf8");
+    expect((await reconcileOnce(project)).action).toBe("projected-canonical");
+    expect((await lstat(join(root, "AGENTS.md"))).isFile()).toBe(true);
+    expect(await readFile(join(root, "AGENTS.md"), "utf8"))
+      .toContain("- The user's attention is the budget.");
+    expect((await lstat(join(root, "CLAUDE.md"))).isSymbolicLink()).toBe(true);
+    expect((await reconcileOnce(project)).action).toBe("noop");
+
+    // And back: dropping the import returns AGENTS.md to a plain link.
+    await writeFile(canonical, "# Instructions\n\nKeep it short.\n", "utf8");
+    expect((await reconcileOnce(project)).action).toBe("projected-canonical");
+    expect((await lstat(join(root, "AGENTS.md"))).isSymbolicLink()).toBe(true);
+    expect((await reconcileOnce(project)).action).toBe("noop");
+  });
+
   it("keeps a plain link when the instructions import nothing", async () => {
     const root = await scratch("instruction-no-imports-");
     await writeFile(join(root, "CLAUDE.md"), "# Instructions\n", "utf8");
