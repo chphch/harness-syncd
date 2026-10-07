@@ -31,9 +31,13 @@ Verified against official documentation on **2026-09-10**. Native formats evolve
 
 ### Instructions
 
-The root Markdown body is byte-shared. `CLAUDE.md` and `AGENTS.md` point to the same canonical file. Claude officially documents both `CLAUDE.md -> AGENTS.md` symlinks and `@AGENTS.md` imports. Codex concatenates one instruction file per directory from repository root to CWD, preferring `AGENTS.override.md`. Antigravity recognizes both `AGENTS.md` and `GEMINI.md`; the adapter manages one active name, retains a lone existing `GEMINI.md` fallback, and refuses an ambiguous pair unless `--force` backs up and retires the fallback.
+The root Markdown body is byte-shared unless it imports another file. `CLAUDE.md` and `AGENTS.md` point to the same canonical file.
 
-v0.2 imports one root Claude instruction source (root `CLAUDE.md`, falling back to `.claude/CLAUDE.md`). The common official `CLAUDE.md` wrapper line `@AGENTS.md` is expanded during migration so projecting the result back to `AGENTS.md` cannot create a self-import. Other recursive/nested imports and instruction scopes are a planned artifact type rather than being flattened.
+A line consisting only of `@path` is a Claude Code import: Claude replaces it with that file's content before the model sees it. Codex and Antigravity pass the line through as text, so the imported file never reaches them (measured 2026-10-07, codex-cli 0.160.1 and `agy`). When the canonical instructions contain such a line, the Codex and Antigravity projections are therefore rendered files rather than links: each import is replaced by the file's content between `<!-- harness-sync:import <path> -->` and `<!-- harness-sync:end-import <path> -->` markers, following nested imports up to five hops as Claude does. Paths resolve as Claude resolves them, against the directory Claude reads the instructions from (the project root, or `~/.claude` for user scope); `~/` and absolute paths also work. Imported files count as canonical input, so editing one re-projects the rendered copies. Capture folds a rendered block back into its `@path` line; an edit made inside a block cannot be represented and stops sync as a conflict — edit the imported file instead. `@path` inside running text is left alone in every target except Claude.
+
+Claude officially documents both `CLAUDE.md -> AGENTS.md` symlinks and `@AGENTS.md` imports. Codex concatenates one instruction file per directory from repository root to CWD, preferring `AGENTS.override.md`. Antigravity recognizes both `AGENTS.md` and `GEMINI.md`; the adapter manages one active name, retains a lone existing `GEMINI.md` fallback, and refuses an ambiguous pair unless `--force` backs up and retires the fallback.
+
+v0.2 imports one root Claude instruction source (root `CLAUDE.md`, falling back to `.claude/CLAUDE.md`). The common official `CLAUDE.md` wrapper line `@AGENTS.md` is expanded during migration so projecting the result back to `AGENTS.md` cannot create a self-import. Other imports stay as `@path` lines in canonical and are rendered only into the Codex and Antigravity projections (above); nested instruction scopes are a planned artifact type.
 
 ### Skills
 

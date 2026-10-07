@@ -36,7 +36,14 @@ import {
 } from "../core/secrets.js";
 import { assertArtifactName } from "../core/validate.js";
 import { GENERATED_DIRECTORY_NAMES } from "../core/fs.js";
-import type { HookScriptLayout } from "./adapter.js";
+import type { AdapterContext, HookScriptLayout } from "./adapter.js";
+import { instructionImportBase } from "./adapter.js";
+import type { ManagedWriter } from "../core/writer.js";
+import {
+  collapseInstructionImports,
+  hasImportLines,
+  renderInstructionImports,
+} from "../core/instruction-imports.js";
 import {
   assertNamedFileName,
   type NamedFileEntry,
@@ -968,8 +975,32 @@ export async function importInstruction(
   );
   const content = await readTextIfExists(source);
   if (content === null) return null;
-  if (write) await writeTextAtomicInside(storeDir, destination, content);
+  // A target that cannot follow `@path` imports was given them rendered;
+  // canonical keeps the import line, not the copy.
+  if (write) {
+    await writeTextAtomicInside(storeDir, destination, collapseInstructionImports(content));
+  }
   return destination;
+}
+
+/**
+ * Project the canonical instructions to a target that does not expand `@path`
+ * imports itself (Codex, Antigravity). Without an import that resolves, this is
+ * the plain link or copy every other artifact gets; with one, the target gets a
+ * rendered file in which each import is replaced by the file's content.
+ */
+export async function projectInstructionsWithImports(
+  writer: ManagedWriter,
+  source: string,
+  destination: string,
+  context: AdapterContext,
+): Promise<boolean> {
+  const text = await readTextIfExists(source);
+  if (text !== null && hasImportLines(text)) {
+    const rendered = await renderInstructionImports(text, instructionImportBase(context));
+    if (rendered.text !== text) return writer.text(destination, rendered.text);
+  }
+  return writer.file(source, destination);
 }
 
 export async function importSkills(

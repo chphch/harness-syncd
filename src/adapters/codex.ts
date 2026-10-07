@@ -42,6 +42,7 @@ import {
   cloneHarness,
   deepMerge,
   importInstruction,
+  projectInstructionsWithImports,
   importSkills,
   hasMcpBlockingHooks,
   mergeCapturedMcpServers,
@@ -370,9 +371,11 @@ export class CodexAdapter implements HarnessAdapter {
         locallyPreservedPermissionKeys.push("sandbox_workspace_write");
       }
     }
-    await writer.file(
+    await projectInstructionsWithImports(
+      writer,
       resolveInside(context.storeDir, harness.instructions.root),
       paths.instructions,
+      context,
     );
     for (const skill of harness.skills) {
       await writer.directory(

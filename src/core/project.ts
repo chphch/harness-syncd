@@ -171,6 +171,7 @@ export function adapterContext(
     targetRoot: resolveTargetRoot(project.configPath, project.config, target),
     storeDir: project.storeDir,
     scope: project.config.scope,
+    instructionImportBase: resolveTargetRoot(project.configPath, project.config, "claude"),
   };
 }
 

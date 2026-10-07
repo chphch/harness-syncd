@@ -10,9 +10,15 @@ import { isRecord } from "./frontmatter.js";
 import {
   assertSafeStorePath,
   hashPaths,
+  readTextIfExists,
   resolveInside,
   writeJsonAtomicInside,
 } from "./fs.js";
+import { resolveTargetRoot } from "./config.js";
+import {
+  hasImportLines,
+  renderInstructionImports,
+} from "./instruction-imports.js";
 import type { LoadedProject } from "./project.js";
 
 const STATE_FILE = ".state.json";
@@ -28,9 +34,28 @@ export async function hashCanonical(
       resolveInside(project.storeDir, relativePath),
     ),
   ];
+  // Files the instructions import live outside the store, but a target that
+  // receives them rendered (instruction-imports.ts) must be re-projected when
+  // one of them changes, so they count as canonical input.
+  paths.push(...(await instructionImportDependencies(project, harness)));
   // Dedupe AFTER resolving: two relative spellings can name one file, and
   // hashPaths would otherwise hash it twice.
   return hashPaths([...new Set(paths)]);
+}
+
+async function instructionImportDependencies(
+  project: LoadedProject,
+  harness: CanonicalHarness,
+): Promise<string[]> {
+  const text = await readTextIfExists(
+    resolveInside(project.storeDir, harness.instructions.root),
+  );
+  if (text === null || !hasImportLines(text)) return [];
+  const rendered = await renderInstructionImports(
+    text,
+    resolveTargetRoot(project.configPath, project.config, "claude"),
+  );
+  return rendered.dependencies;
 }
 
 export async function readState(storeDir: string): Promise<ProjectionState | null> {

@@ -6,7 +6,8 @@ import type {
   Scope,
   TargetName,
 } from "../types.js";
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 export interface AdapterContext {
   projectRoot: string;
@@ -16,6 +17,17 @@ export interface AdapterContext {
   /** Original canonical store accepted when an isolated migration stage reads
    * an already-managed native symlink. */
   canonicalSourceStoreDir?: string;
+  /** Directory Claude Code reads the instruction file from; `@path` imports in
+   * the canonical instructions resolve against it. Carried on the context so a
+   * round-trip shadow projection resolves the same files as the real one. */
+  instructionImportBase?: string;
+}
+
+export function instructionImportBase(context: AdapterContext): string {
+  if (context.instructionImportBase) return context.instructionImportBase;
+  return context.scope === "project"
+    ? context.projectRoot
+    : join(homedir(), ".claude");
 }
 
 export function captureBoundary(context: AdapterContext): string {

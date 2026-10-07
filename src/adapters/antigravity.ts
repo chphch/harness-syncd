@@ -44,6 +44,7 @@ import {
   cloneHarness,
   deepMerge,
   importInstruction,
+  projectInstructionsWithImports,
   importRules,
   importSkills,
   hasMcpBlockingHooks,
@@ -333,7 +334,7 @@ export class AntigravityAdapter implements HarnessAdapter {
         "both Antigravity instruction filenames are active",
       );
       if (retired) {
-        await writer.file(instructionSource, paths.instructions);
+        await projectInstructionsWithImports(writer, instructionSource, paths.instructions, context);
       } else {
         writer.retain(paths.instructions);
         projectionWarnings.push({
@@ -352,7 +353,12 @@ export class AntigravityAdapter implements HarnessAdapter {
         alternateInstructionsExist
           ? paths.alternateInstructions
           : paths.instructions;
-      await writer.file(instructionSource, instructionDestination);
+      await projectInstructionsWithImports(
+        writer,
+        instructionSource,
+        instructionDestination,
+        context,
+      );
     }
     for (const rule of paths.rules
       ? harness.rules.filter(
