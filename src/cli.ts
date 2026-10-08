@@ -59,7 +59,13 @@ import { driftedManagedPaths } from "./core/writer.js";
 import { validateHarness } from "./core/validate.js";
 import { CARRY_STORE_PREFIX } from "./core/carry-entry.js";
 import { carrySummary, registerCarryCommands } from "./cli-carry.js";
-import { createFleetNoticeWriter, formatNotice, superviseFleet } from "./cli-fleet.js";
+import {
+  compactResultForStream,
+  createEventStreamFilter,
+  createFleetNoticeWriter,
+  formatNotice,
+  superviseFleet,
+} from "./cli-fleet.js";
 import { createFleetHealthRecorder, fleetHealthPath } from "./core/fleet-health.js";
 import {
   statusAllControllers,
@@ -404,6 +410,8 @@ program
     const signals = processAbortController();
     const stderr = (text: string) => process.stderr.write(text);
     const notice = createFleetNoticeWriter(stderr);
+    // Which events reach stdout: see createEventStreamFilter.
+    const stream = createEventStreamFilter();
     // Watchers left open by a stop (daemon.ts leaveWatcherOpen): closing them
     // takes tens of seconds for a large store, and the process exits instead.
     const openWatchers: Array<() => Promise<void>> = [];
@@ -429,9 +437,7 @@ program
           deferWatcherClose,
           onEvent: (event) => {
             notice(event);
-            if (event.type !== "result" || event.result.action !== "noop") {
-              printFleetWatchEvent(event);
-            }
+            if (stream(event)) printFleetWatchEvent(event);
           },
         });
       } else {
@@ -449,8 +455,9 @@ program
           signal: signals.controller.signal,
           deferWatcherClose,
           onResult: (result) => {
-            notice({ type: "result", ...base, result });
-            if (result.action !== "noop") print(result);
+            const event = { type: "result" as const, ...base, result };
+            notice(event);
+            if (stream(event)) print(compactResultForStream(result));
           },
           onError: (error, during) => {
             notice({ type: "error", ...base, error: error.message, during });
@@ -861,7 +868,10 @@ async function exitLeavingWatchersOpen(): Promise<never> {
 }
 
 function printFleetWatchEvent(event: FleetWatchEvent): void {
-  printEvent({ at: new Date().toISOString(), controller: event.id, config: event.configPath, ...event });
+  const printed = event.type === "result"
+    ? { ...event, result: compactResultForStream(event.result) }
+    : event;
+  printEvent({ at: new Date().toISOString(), controller: event.id, config: event.configPath, ...printed });
 }
 
 function printEvent(value: unknown): void {

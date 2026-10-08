@@ -109,7 +109,7 @@ Each stderr notice is one line starting with an ISO-8601 time (a parked controll
 - a controller's cycles start to conflict or fail, or change to a different conflict or error — repeated hourly while it persists, with a closing line when a cycle succeeds again; a failed Git backup is reported the same way;
 - the process stops: the fatal error, or `stopped by SIGTERM; exiting with status 0` on a signal.
 
-stdout keeps the event stream, one JSON object per line with the global `--json` flag; noop results are left out. Every event carries `at`, `controller` and `config`:
+stdout keeps the event stream, one JSON object per line with the global `--json` flag. Noop results are left out, and a conflicting or failing cycle (`error` with `during` `sync` or `backup`) follows the rule of its stderr notice: it is written when it starts or changes, hourly while it persists, and the cycle that ends it is written even when it is a noop. In a `result`, each `applyResults` entry gives `written`, `linked` and `warnings` as counts, because the two path lists name every path the projection accounts for, unchanged ones included, and the warnings are repeated in `result.warnings`; `removed` and `skipped` list their paths. `sync` and `apply` still print full results. Every event carries `at`, `controller` and `config`:
 
 | `type` | Extra fields | Meaning |
 |---|---|---|

@@ -3,13 +3,18 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createFleetNoticeWriter, formatDelay } from "../src/cli-fleet.js";
+import {
+  compactResultForStream,
+  createEventStreamFilter,
+  createFleetNoticeWriter,
+  formatDelay,
+} from "../src/cli-fleet.js";
 import { writeProjectConfig } from "../src/core/config.js";
 import { readFleetHealth, type FleetHealth } from "../src/core/fleet-health.js";
 import { pathExists } from "../src/core/fs.js";
 import { migrateFrom } from "../src/core/migrate.js";
 import { initializeProject } from "../src/core/project.js";
-import { reconcileOnce } from "../src/core/reconcile.js";
+import { readConflictRecord, reconcileOnce } from "../src/core/reconcile.js";
 import { addController } from "../src/core/registry.js";
 import {
   statusAllControllers,
@@ -251,6 +256,117 @@ describe("fleet notices on stderr", () => {
   });
 });
 
+describe("the stdout event stream", () => {
+  function stream() {
+    let clock = T0;
+    const keep = createEventStreamFilter({ now: () => new Date(clock) });
+    const written: string[] = [];
+    return {
+      written,
+      send: (label: string, event: FleetWatchEvent) => {
+        if (keep(event)) written.push(label);
+      },
+      advance: (ms: number) => {
+        clock += ms;
+      },
+    };
+  }
+
+  it("writes a repeated conflict when it starts, hourly while it lasts, and the noop that ends it", () => {
+    // 2026-10-08: 103,037 of the daemon log's 133,749 lines repeated the
+    // conflict before them, one per 30 s audit tick.
+    const { written, send, advance } = stream();
+    const conflict = (label: string) =>
+      send(label, { type: "result", ...base, result: result("conflict", "Concurrent canonical/native edits") });
+    send("started", { type: "started", ...base });
+    conflict("conflict 0");
+    for (let tick = 1; tick <= 121; tick += 1) {
+      advance(30_000);
+      conflict(`conflict ${tick}`);
+    }
+    advance(30_000);
+    send("noop ending it", { type: "result", ...base, result: result("noop") });
+    advance(30_000);
+    send("noop", { type: "result", ...base, result: result("noop") });
+    send("captured", { type: "result", ...base, result: result("captured-native") });
+    advance(30_000);
+    conflict("conflict again");
+    expect(written).toEqual([
+      "started",
+      "conflict 0",
+      "conflict 120",
+      "noop ending it",
+      "captured",
+      "conflict again",
+    ]);
+  });
+
+  it("writes a changed problem at once, dedupes failing cycles and backups, and passes everything else", () => {
+    const { written, send, advance } = stream();
+    const eacces = (uuid: string) => `EACCES: permission denied, open '/p/.claude/.${uuid}.tmp'`;
+    send("conflict A", { type: "result", ...base, result: result("conflict", "Concurrent edits") });
+    send("conflict B", { type: "result", ...base, result: result("conflict", "partially representable") });
+    send("sync error", {
+      type: "error", ...base, error: eacces("3f1c2a9e-0b1d-4c55-9a8e-2b1f0c9d7e61"), during: "sync",
+    });
+    advance(30_000);
+    // The same failure, differing only by its temp name: see problemKey.
+    send("sync error again", {
+      type: "error", ...base, error: eacces("a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d"), during: "sync",
+    });
+    send("backup error", { type: "error", ...base, error: "spawn EBADF", during: "backup" });
+    send("backup error again", { type: "error", ...base, error: "spawn EBADF", during: "backup" });
+    send("watch error", { type: "error", ...base, error: "EMFILE: too many open files", during: "watch" });
+    send("watch error again", { type: "error", ...base, error: "EMFILE: too many open files", during: "watch" });
+    send("restarting", { type: "restarting", ...base, error: "EMFILE", attempt: 1, delayMs: 10_000 });
+    send("warning", { type: "warning", ...base, path: "/p/sock", code: "UNKNOWN", warning: "UNKNOWN" });
+    send("noop after the failure", { type: "result", ...base, result: result("noop") });
+    send("stopped", { type: "stopped", ...base });
+    expect(written).toEqual([
+      "conflict A",
+      "conflict B",
+      "sync error",
+      "backup error",
+      "watch error",
+      "watch error again",
+      "restarting",
+      "warning",
+      "noop after the failure",
+      "stopped",
+    ]);
+  });
+
+  it("counts the path lists and warnings of each projection, keeping removed and skipped paths", () => {
+    const warning = { code: "agent-capabilities-conservative-fallback", message: "fallback" };
+    const full: ReconcileResult = {
+      ...result("projected-canonical"),
+      applyResults: [{
+        target: "claude",
+        written: ["/p/CLAUDE.md", "/p/.claude/settings.json"],
+        linked: ["/p/.claude/skills/a", "/p/.claude/skills/b", "/p/.claude/skills/c"],
+        removed: ["/p/.claude/skills/old"],
+        skipped: ["/p/.claude/agents/mine.md"],
+        warnings: [warning],
+      }],
+      warnings: [warning],
+    };
+    const before = JSON.stringify(full);
+
+    expect(compactResultForStream(full)).toEqual({
+      ...full,
+      applyResults: [{
+        target: "claude",
+        written: 2,
+        linked: 3,
+        removed: ["/p/.claude/skills/old"],
+        skipped: ["/p/.claude/agents/mine.md"],
+        warnings: 1,
+      }],
+    });
+    expect(JSON.stringify(full)).toBe(before);
+  });
+});
+
 describe("watch --all", () => {
   it("writes a controller restart to stderr and keeps the JSON event on stdout", async () => {
     // A real environmental failure end to end: an entry deeper than PATH_MAX
@@ -403,7 +519,7 @@ describe("watch --all", () => {
     expect(await pathExists(join(project.storeDir, ".lock"))).toBe(false);
   }, 60_000);
 
-  it("writes a persistent conflict to stderr once, and status --all reports it", async () => {
+  it("writes a persistent conflict to stderr and stdout once, and status --all reports it", async () => {
     const root = await mkdtemp(join(tmpdir(), "hs-cli-conflict-"));
     roots.push(root);
     const registryPath = join(root, "registry.yaml");
@@ -442,10 +558,13 @@ describe("watch --all", () => {
     );
     let status: FleetStatusResult | undefined;
     try {
+      // Every conflicting cycle rewrites the record with its own detectedAt.
       const deadline = Date.now() + 15_000;
-      const conflicts = () => stdout.split("\n").filter((line) => line.includes('"action":"conflict"')).length;
-      while (conflicts() < 3) {
+      const cycles = new Set<string>();
+      while (cycles.size < 3) {
         if (Date.now() > deadline) throw new Error(`fewer than 3 conflict cycles; stderr: ${stderr}`);
+        const record = await readConflictRecord(project.storeDir);
+        if (record) cycles.add(record.detectedAt);
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
       }
       status = await statusAllControllers(registryPath);
@@ -455,6 +574,7 @@ describe("watch --all", () => {
 
     expect(await exited).toBe(0);
     expect(stderr.match(/controller stuck sync conflict: Concurrent canonical\/native/gu)).toHaveLength(1);
+    expect(stdout.split("\n").filter((line) => line.includes('"action":"conflict"'))).toHaveLength(1);
     expect(status?.daemon.running).toBe(true);
     expect(status?.summary.degraded).toBe(1);
     expect(status?.controllers[0]).toMatchObject({ id: "stuck", status: "conflict" });

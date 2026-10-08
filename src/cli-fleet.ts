@@ -1,3 +1,4 @@
+import type { ApplyResult } from "./types.js";
 import {
   problemKey,
   type FleetExit,
@@ -6,6 +7,7 @@ import {
 import {
   STALE_CAPTURE_DIR_NOT_REMOVED,
   STALE_CAPTURE_DIR_REMOVED,
+  type ReconcileResult,
 } from "./core/reconcile.js";
 import {
   watchAllControllers,
@@ -85,33 +87,26 @@ export function createFleetNoticeWriter(
   options: NoticeOptions = {},
 ): (event: FleetWatchEvent) => void {
   const now = options.now ?? (() => new Date());
-  const repeatMs = options.repeatMs ?? DEFAULT_NOTICE_REPEAT_MS;
   const warned = new Set<string>();
-  const problems = new Map<string, Problem>();
+  const problems = createProblemTracker(now, options.repeatMs ?? DEFAULT_NOTICE_REPEAT_MS);
   const line = (text: string) => write(formatNotice(now(), text));
 
   const problem = (
     event: { id: string },
-    channel: "sync" | "backup",
+    channel: ProblemChannel,
     kind: Problem["kind"],
     message: string,
   ) => {
-    const key = `${event.id}\0${channel}`;
-    const at = now().getTime();
-    const current = problems.get(key);
+    const verdict = problems.report(event.id, channel, kind, message);
     const [label, stillLabel] = PROBLEM_LABELS[`${channel} ${kind}`];
-    // Compared without per-attempt temp names: see problemKey.
-    if (!current || current.kind !== kind || current.key !== problemKey(message)) {
-      problems.set(key, { kind, key: problemKey(message), since: at, lastNotice: at });
+    if (verdict.write === "first") {
       line(`controller ${event.id} ${label}: ${oneLine(message)}`);
-      return;
+    } else if (verdict.write === "reminder") {
+      line(
+        `controller ${event.id} ${stillLabel} since ` +
+          `${new Date(verdict.since).toISOString()}: ${oneLine(message)}`,
+      );
     }
-    if (at - current.lastNotice < repeatMs) return;
-    current.lastNotice = at;
-    line(
-      `controller ${event.id} ${stillLabel} since ` +
-        `${new Date(current.since).toISOString()}: ${oneLine(message)}`,
-    );
   };
 
   return (event) => {
@@ -158,17 +153,15 @@ export function createFleetNoticeWriter(
           line(`controller ${event.id} ${oneLine(warning.message)}`);
         }
         if (event.result.action === "conflict") {
-          problem(event, "sync", "conflict", event.result.conflict?.message ?? "native/canonical conflict");
+          problem(event, "sync", "conflict", conflictMessage(event.result));
           return;
         }
-        const key = `${event.id}\0sync`;
-        const current = problems.get(key);
-        if (!current) return;
-        problems.delete(key);
+        const ended = problems.end(event.id, "sync");
+        if (!ended) return;
         line(
           `controller ${event.id} synced again (${event.result.action}) after a ` +
-            `${current.kind === "conflict" ? "conflict" : "failure"} since ` +
-            new Date(current.since).toISOString(),
+            `${ended.kind === "conflict" ? "conflict" : "failure"} since ` +
+            new Date(ended.since).toISOString(),
         );
         return;
       }
@@ -184,12 +177,128 @@ export function createFleetNoticeWriter(
   };
 }
 
+/**
+ * Whether an event goes on the stdout event stream. Noop results stay out, and
+ * a conflicting or failing cycle follows the rule of its stderr notice: it is
+ * written when it starts or changes, again every `repeatMs` while it
+ * persists, and the cycle that ends it is written even when it is a noop, so
+ * the stream shows the end too. Every other event is written.
+ *
+ * Every cycle that was not a noop used to be written, so a store stuck in one
+ * conflict wrote the same ~1 KB result on every 30 s audit tick: by
+ * 2026-10-08, 103,037 of the 133,749 lines (101 of 121 MB) in the daemon's
+ * stdout log repeated the conflict before them.
+ */
+export function createEventStreamFilter(
+  options: NoticeOptions = {},
+): (event: FleetWatchEvent) => boolean {
+  const problems = createProblemTracker(
+    options.now ?? (() => new Date()),
+    options.repeatMs ?? DEFAULT_NOTICE_REPEAT_MS,
+  );
+  return (event) => {
+    switch (event.type) {
+      case "result":
+        if (event.result.action === "conflict") {
+          return problems.report(event.id, "sync", "conflict", conflictMessage(event.result))
+            .write !== "none";
+        }
+        // `end` first: a noop that ends a problem has to end it here too.
+        return problems.end(event.id, "sync") !== undefined || event.result.action !== "noop";
+      case "error":
+        return event.during === "sync" || event.during === "backup"
+          ? problems.report(event.id, event.during, "error", event.error).write !== "none"
+          : true;
+      default:
+        return true;
+    }
+  };
+}
+
+/** An applyResults entry as the event stream writes it: see compactResultForStream. */
+export interface StreamApplyResult {
+  target: ApplyResult["target"];
+  written: number;
+  linked: number;
+  removed: string[];
+  skipped: string[];
+  warnings: number;
+}
+
+/**
+ * A result as the event stream writes it, with `written`, `linked` and
+ * `warnings` of each applyResults entry given as counts. The two path lists
+ * name every path the projection accounts for, unchanged ones included (see
+ * the writer's adoptAlreadyMatching): hundreds for a store of skills and
+ * rules, which made each of its projections a ~42 KB line. The warnings are
+ * repeated in `result.warnings`. `removed` and `skipped` name only paths that
+ * something happened to, and stay in full.
+ */
+export function compactResultForStream(
+  result: ReconcileResult,
+): Omit<ReconcileResult, "applyResults"> & { applyResults: StreamApplyResult[] } {
+  return {
+    ...result,
+    applyResults: result.applyResults.map((applied) => ({
+      target: applied.target,
+      written: applied.written.length,
+      linked: applied.linked.length,
+      removed: applied.removed,
+      skipped: applied.skipped,
+      warnings: applied.warnings.length,
+    })),
+  };
+}
+
+function conflictMessage(result: ReconcileResult): string {
+  return result.conflict?.message ?? "native/canonical conflict";
+}
+
 interface Problem {
   kind: "conflict" | "error";
   /** problemKey of the message. */
   key: string;
   since: number;
   lastNotice: number;
+}
+
+type ProblemChannel = "sync" | "backup";
+
+/**
+ * Each controller's current sync and backup problem, shared by the stderr
+ * notices and the stdout stream so both apply one rule. `report` says whether
+ * to write a problem now: `first` when it starts or changes to a different
+ * one, `reminder` every `repeatMs` while it persists, otherwise `none`.
+ * Messages are compared without per-attempt temp names: see problemKey. `end`
+ * forgets the problem a successful cycle ended, and returns it.
+ */
+function createProblemTracker(now: () => Date, repeatMs: number) {
+  const problems = new Map<string, Problem>();
+  return {
+    report(
+      id: string,
+      channel: ProblemChannel,
+      kind: Problem["kind"],
+      message: string,
+    ): { write: "first" | "none" } | { write: "reminder"; since: number } {
+      const key = `${id}\0${channel}`;
+      const at = now().getTime();
+      const current = problems.get(key);
+      if (!current || current.kind !== kind || current.key !== problemKey(message)) {
+        problems.set(key, { kind, key: problemKey(message), since: at, lastNotice: at });
+        return { write: "first" };
+      }
+      if (at - current.lastNotice < repeatMs) return { write: "none" };
+      current.lastNotice = at;
+      return { write: "reminder", since: current.since };
+    },
+    end(id: string, channel: ProblemChannel): Problem | undefined {
+      const key = `${id}\0${channel}`;
+      const current = problems.get(key);
+      problems.delete(key);
+      return current;
+    },
+  };
 }
 
 /** [first notice, repeat notice] per channel and kind. */
