@@ -105,6 +105,7 @@ Each stderr notice is one line starting with an ISO-8601 time (a parked controll
 
 - a controller restarts or is parked (the first park notice includes the stack; a reminder follows hourly);
 - a path is skipped, once per controller and path;
+- a cycle removes a capture directory that an interrupted run left beside the store, or cannot remove one, once per directory;
 - a controller's cycles start to conflict or fail, or change to a different conflict or error — repeated hourly while it persists, with a closing line when a cycle succeeds again; a failed Git backup is reported the same way;
 - the process stops: the fatal error, or `stopped by SIGTERM; exiting with status 0` on a signal.
 

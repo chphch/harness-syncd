@@ -4,6 +4,10 @@ import {
   type FleetHealthRecorder,
 } from "./core/fleet-health.js";
 import {
+  STALE_CAPTURE_DIR_NOT_REMOVED,
+  STALE_CAPTURE_DIR_REMOVED,
+} from "./core/reconcile.js";
+import {
   watchAllControllers,
   type FleetWatchEvent,
   type RestartPolicy,
@@ -72,7 +76,9 @@ export const DEFAULT_NOTICE_REPEAT_MS = 3_600_000;
  *
  * A path warning is written once per controller and path: chokidar stops
  * retrying an unwatched path, but a restarted controller would otherwise
- * announce the same socket again on every attempt.
+ * announce the same socket again on every attempt. So is a capture directory
+ * that an interrupted run left beside a store and a cycle removed — or could
+ * not remove, which every cycle would otherwise report again.
  */
 export function createFleetNoticeWriter(
   write: (text: string) => void,
@@ -142,6 +148,15 @@ export function createFleetNoticeWriter(
         return;
       }
       case "result": {
+        for (const warning of event.result.warnings) {
+          if (warning.code !== STALE_CAPTURE_DIR_REMOVED && warning.code !== STALE_CAPTURE_DIR_NOT_REMOVED) {
+            continue;
+          }
+          const key = `${event.id}\0${warning.code}\0${warning.path ?? warning.message}`;
+          if (warned.has(key)) continue;
+          warned.add(key);
+          line(`controller ${event.id} ${oneLine(warning.message)}`);
+        }
         if (event.result.action === "conflict") {
           problem(event, "sync", "conflict", event.result.conflict?.message ?? "native/canonical conflict");
           return;

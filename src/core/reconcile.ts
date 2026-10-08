@@ -97,9 +97,13 @@ export async function reconcileOnce(
     const result = await reconcileUnlocked(project);
     // A cycle that did not conflict means no conflict is current any more.
     if (result.action !== "conflict") await clearConflictRecord(project.storeDir);
-    return carry.warnings.length === 0
+    // Last, so that whatever it removes is reported with a result: a cycle
+    // that throws would lose the report, and the next cycle sweeps instead.
+    const swept = await sweepStaleCaptureScratch(project.storeDir);
+    const warnings = [...carry.warnings, ...swept];
+    return warnings.length === 0
       ? result
-      : { ...result, warnings: [...carry.warnings, ...result.warnings] };
+      : { ...result, warnings: [...warnings, ...result.warnings] };
   } finally {
     if (release) await release();
   }
@@ -624,11 +628,94 @@ async function selectInverseCapture(
   return { source: entries[0]!.target, changedPaths: sharedPaths };
 }
 
+/**
+ * The scratch directories a capture creates beside its store: the stage
+ * (createCaptureStage) and the round-trip container, which
+ * nativeRoundTripMismatches creates beside the stage. commitCaptureStage
+ * copies out of the stage rather than renaming it, so the stage does not have
+ * to share the store's filesystem.
+ */
+const CAPTURE_STAGE_PREFIX = ".harness-sync-capture-";
+const ROUND_TRIP_PREFIX = ".harness-sync-roundtrip-";
+
+/**
+ * How old a capture scratch directory must be before a cycle removes it. A
+ * capture takes seconds. The margin protects one still in flight in another
+ * process that shares the parent directory: an unlocked `migrate` dry run of
+ * the same store, or a store some other registry keeps beside this one.
+ */
+export const STALE_CAPTURE_SCRATCH_MS = 3_600_000;
+
+/** Warning codes of sweepStaleCaptureScratch. */
+export const STALE_CAPTURE_DIR_REMOVED = "stale-capture-dir-removed";
+export const STALE_CAPTURE_DIR_NOT_REMOVED = "stale-capture-dir-not-removed";
+
+/**
+ * Remove the capture scratch directories an interrupted run left beside the
+ * store, once they are STALE_CAPTURE_SCRATCH_MS old, and say so. Every caller
+ * removes its own in a `finally`, so one that survives means the process died
+ * mid-capture: SIGKILL, a timeout, a CLI run cut off. For a project store the
+ * parent is the project's working tree, so they showed up in its `git status`:
+ * one project collected eight stages and five round-trip containers between
+ * 2026-10-01 and 2026-10-05. Only real directories are removed; a symlink of
+ * that name, and whatever it points at, is left alone. One that cannot be
+ * removed is reported, and tried again next cycle.
+ */
+export async function sweepStaleCaptureScratch(
+  storeDir: string,
+  now: number = Date.now(),
+): Promise<AdapterWarning[]> {
+  const parent = dirname(resolve(storeDir));
+  const failed = (path: string, what: string, error: unknown): AdapterWarning => ({
+    code: STALE_CAPTURE_DIR_NOT_REMOVED,
+    message: `${what}: ${error instanceof Error ? error.message : String(error)}`,
+    path,
+  });
+  const notRemoved = (path: string, error: unknown) =>
+    failed(path, `could not remove ${path}, left by an interrupted capture`, error);
+  let names: string[];
+  try {
+    names = await readdir(parent);
+  } catch (error) {
+    return [failed(parent, `could not look for interrupted captures' directories in ${parent}`, error)];
+  }
+  const warnings: AdapterWarning[] = [];
+  for (const name of names.sort()) {
+    if (!name.startsWith(CAPTURE_STAGE_PREFIX) && !name.startsWith(ROUND_TRIP_PREFIX)) continue;
+    const path = join(parent, name);
+    let info: Stats;
+    try {
+      info = await lstat(path);
+    } catch (error) {
+      // Gone already: its own run finished, or another sweep got there first.
+      if (!(isNodeError(error) && error.code === "ENOENT")) {
+        warnings.push(failed(path, `could not check ${path}`, error));
+      }
+      continue;
+    }
+    if (!info.isDirectory() || now - info.mtimeMs < STALE_CAPTURE_SCRATCH_MS) continue;
+    try {
+      await rm(path, { recursive: true, force: true });
+    } catch (error) {
+      warnings.push(notRemoved(path, error));
+      continue;
+    }
+    warnings.push({
+      code: STALE_CAPTURE_DIR_REMOVED,
+      message:
+        `removed ${path}, left by an interrupted capture ` +
+        `(last modified ${new Date(info.mtimeMs).toISOString()})`,
+      path,
+    });
+  }
+  return warnings;
+}
+
 export async function createCaptureStage(
   storeDir: string,
   harness: CanonicalHarness,
 ): Promise<string> {
-  const stageDir = await mkdtemp(join(dirname(storeDir), ".harness-sync-capture-"));
+  const stageDir = await mkdtemp(join(dirname(storeDir), CAPTURE_STAGE_PREFIX));
   try {
     for (const relativePath of canonicalArtifactPaths(harness)) {
       await copyCanonicalArtifact(storeDir, stageDir, relativePath);
@@ -855,9 +942,7 @@ async function nativeRoundTripMismatches(
   changedPaths: readonly string[],
 ): Promise<string[]> {
   if (changedPaths.length === 0) return [];
-  const shadowContainer = await mkdtemp(
-    join(dirname(storeDir), ".harness-sync-roundtrip-"),
-  );
+  const shadowContainer = await mkdtemp(join(dirname(storeDir), ROUND_TRIP_PREFIX));
   const shadowTargetRoot = sourceContext.scope === "project"
     ? join(shadowContainer, "project")
     : join(shadowContainer, basename(sourceContext.targetRoot));

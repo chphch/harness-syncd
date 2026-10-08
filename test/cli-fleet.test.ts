@@ -213,6 +213,35 @@ describe("fleet notices on stderr", () => {
     );
   });
 
+  it("writes a capture directory a cycle removed, and one it could not remove only once", () => {
+    const { lines, notice } = collect();
+    const swept = (code: string, path: string, message: string): FleetWatchEvent => ({
+      type: "result",
+      ...base,
+      result: { ...result("noop"), warnings: [{ code, path, message }] },
+    });
+    const stuck = swept(
+      "stale-capture-dir-not-removed",
+      "/p/.harness-sync-capture-6KOJZB",
+      "could not remove /p/.harness-sync-capture-6KOJZB, left by an interrupted capture: EACCES",
+    );
+    notice(swept(
+      "stale-capture-dir-removed",
+      "/p/.harness-sync-capture-PUBOTs",
+      "removed /p/.harness-sync-capture-PUBOTs, left by an interrupted capture " +
+        "(last modified 2026-10-01T08:38:00.000Z)",
+    ));
+    notice(stuck);
+    notice(stuck);
+    notice({ type: "result", ...base, result: { ...result("noop"), warnings: [{ code: "other", message: "x" }] } });
+    expect(lines).toEqual([
+      `${STAMP}controller alpha removed /p/.harness-sync-capture-PUBOTs, left by an interrupted ` +
+        "capture (last modified 2026-10-01T08:38:00.000Z)\n",
+      `${STAMP}controller alpha could not remove /p/.harness-sync-capture-6KOJZB, left by an ` +
+        "interrupted capture: EACCES\n",
+    ]);
+  });
+
   it("formats backoff delays for people", () => {
     expect(formatDelay(50)).toBe("50ms");
     expect(formatDelay(1_500)).toBe("1.5s");
