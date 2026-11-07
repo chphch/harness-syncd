@@ -311,7 +311,12 @@ Run the plain `apply` only when the dry run shows an empty `skipped` list for
 every target: every native path then still holds content harness-sync wrote, so
 nothing someone else edited is overwritten. A skipped path holds a native edit —
 keep it with an explicit `migrate --apply` of that target, or replace it with
-`apply --force`, which backs the native file up first. To see which side a
+`apply --force`, which backs the native file up first. Keeping it takes both:
+`migrate --apply` copies the native content into canonical, but the managed
+record still holds the old hash, so the next `apply --dry-run` skips the same
+path again; `apply --force` then rewrites it with identical content and records
+the new hash (checked 2026-11-07 on a project `CLAUDE.md`: the file came out
+byte-identical and the conflict record cleared). To see which side a
 change came from, list the native files newer than the state's `updatedAt`.
 
 ## Documentation
