@@ -170,23 +170,19 @@ describe("the backup tick", () => {
     expect(await run.outcome).toBe("resolved");
   });
 
-  it("runs one backup at a time and takes the ticks that came during one right after it", async () => {
-    const first = gate(GIT_RESULT);
-    vi.mocked(backupCanonicalStore).mockImplementationOnce(() => first.promise);
+  it("does not make the next tick's backup wait for one still running", async () => {
+    // A stalled push: nothing bounds how long it can hold on.
+    const stalled = gate(GIT_RESULT);
+    vi.mocked(backupCanonicalStore).mockImplementationOnce(() => stalled.promise);
     const project = await backupController();
     const run = await start(project);
     await until(() => run.results() === 1, "the startup cycle to end");
 
     vi.advanceTimersByTime(INTERVAL);
     vi.advanceTimersByTime(INTERVAL);
-    vi.advanceTimersByTime(INTERVAL);
-    expect(backups()).toBe(1);
-
-    first.open();
-    await until(() => backups() === 2, "the backup the later ticks asked for");
-    await sleep(20);
     expect(backups()).toBe(2);
 
+    stalled.open();
     run.abort.abort();
     expect(await run.outcome).toBe("resolved");
   });
