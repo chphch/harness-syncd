@@ -173,6 +173,8 @@ export async function watchProject(
   let audit: ReturnType<typeof setInterval> | undefined;
   let backup: ReturnType<typeof setInterval> | undefined;
   let activeRun: Promise<void> | null = null;
+  let activeBackup: Promise<void> | null = null;
+  let backupDue = false;
   let pending = false;
   let stopping = false;
   let settleStop: ((error: Error | null) => void) | undefined;
@@ -285,6 +287,36 @@ export async function watchProject(
       timer = setTimeout(() => void run(), project.config.sync.debounceMs);
     };
 
+    // A backup never starts inside a sync cycle, which can be halfway through
+    // writing a capture into the store, and never beside another backup. A
+    // tick that finds either one running stays due instead of being dropped,
+    // which would put the backup off by a whole interval: both call this when
+    // they end, so the backup starts as soon as neither is running. A cycle
+    // does not wait for a backup in turn, since the backup's fetch and push
+    // have no time limit and a stalled network must not stall sync. A cycle
+    // that writes during a backup can change what gets staged, but the commit
+    // is only the tree syncGitStore froze and validated. Defined before run,
+    // whose finally calls it.
+    const startBackup = () => {
+      if (stopping || stopped || !backupDue || activeRun || activeBackup) return;
+      backupDue = false;
+      activeBackup = (async () => {
+        try {
+          await backupCanonicalStore(project, {
+            push: project.config.git.autoPush,
+            message: `harness-sync backup ${new Date().toISOString().slice(0, 10)}`,
+          });
+        } catch (error) {
+          // A failed backup must not stop the watcher: projection is the
+          // daemon's job and it still works. Report and keep watching.
+          options.onError?.(normalizeError(error), "backup");
+        } finally {
+          activeBackup = null;
+          startBackup();
+        }
+      })();
+    };
+
     const run = (): Promise<void> => {
       if (stopping) return Promise.resolve();
       if (activeRun) {
@@ -308,6 +340,7 @@ export async function watchProject(
           }
         } finally {
           activeRun = null;
+          startBackup();
           if (pending && !stopping) {
             pending = false;
             schedule();
@@ -353,19 +386,8 @@ export async function watchProject(
     // happen in here or not at all.
     if (project.config.git.enabled && project.config.git.backupIntervalMs > 0) {
       backup = setInterval(() => {
-        void (async () => {
-          if (stopping || activeRun) return;
-          try {
-            await backupCanonicalStore(project, {
-              push: project.config.git.autoPush,
-              message: `harness-sync backup ${new Date().toISOString().slice(0, 10)}`,
-            });
-          } catch (error) {
-            // A failed backup must not stop the watcher: projection is the
-            // daemon's job and it still works. Report and keep watching.
-            options.onError?.(normalizeError(error), "backup");
-          }
-        })();
+        backupDue = true;
+        startBackup();
       }, Math.max(60_000, project.config.git.backupIntervalMs));
     }
     await run();
