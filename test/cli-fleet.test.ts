@@ -22,6 +22,7 @@ import {
   type FleetWatchEvent,
 } from "../src/core/supervisor.js";
 import type { ReconcileResult } from "../src/core/reconcile.js";
+import { buildTreePastPathMax } from "./fixtures/deep-tree.js";
 
 const roots: string[] = [];
 
@@ -384,17 +385,7 @@ describe("watch --all", () => {
     await addController(project.configPath, { registryPath });
     const skill = join(projectRoot, ".claude", "skills", "runtime");
     await mkdir(skill, { recursive: true });
-    const segment = "d".repeat(200);
-    let depth = 0;
-    while (skill.length + depth * (segment.length + 1) < 1_100) depth += 1;
-    execFileSync("/bin/sh", [
-      "-c",
-      'cd "$1" && i=0 && while [ "$i" -lt "$2" ]; do mkdir "$3" && cd "$3" || exit 1; i=$((i+1)); done',
-      "sh",
-      skill,
-      String(depth),
-      segment,
-    ]);
+    buildTreePastPathMax(skill);
 
     const child = spawn(
       process.execPath,

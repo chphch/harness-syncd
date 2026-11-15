@@ -13,6 +13,7 @@ import {
   type WatchWarning,
 } from "../src/core/daemon.js";
 import { initializeProject, type LoadedProject } from "../src/core/project.js";
+import { buildTreePastPathMax } from "./fixtures/deep-tree.js";
 
 const roots: string[] = [];
 const children: ChildProcess[] = [];
@@ -23,7 +24,8 @@ afterEach(() => {
   syncBuiltinESMExports();
   for (const child of children.splice(0)) child.kill("SIGKILL");
   // `rm -rf`, not fs.rm: one fixture below builds a tree deeper than PATH_MAX,
-  // which node's recursive rm cannot delete and BSD rm (fts) can.
+  // which node's recursive rm cannot delete and rm(1) can (BSD and GNU rm both
+  // walk it with fts).
   for (const root of roots.splice(0)) execFileSync("rm", ["-rf", root]);
 });
 
@@ -292,18 +294,7 @@ describe("path-scoped watch errors", () => {
     // emits "ready". Classifying it as path-scoped would wait forever.
     const root = await tempRoot();
     const project = await claudeOnlyController(root);
-    const base = runtimeDir(root);
-    const segment = "d".repeat(200);
-    let depth = 0;
-    while (base.length + depth * (segment.length + 1) < 1_100) depth += 1;
-    execFileSync("/bin/sh", [
-      "-c",
-      'cd "$1" && i=0 && while [ "$i" -lt "$2" ]; do mkdir "$3" && cd "$3" || exit 1; i=$((i+1)); done && : > leaf.txt',
-      "sh",
-      base,
-      String(depth),
-      segment,
-    ]);
+    buildTreePastPathMax(runtimeDir(root), { leafFile: "leaf.txt" });
 
     const run = runController(project);
     const settled = await Promise.race([

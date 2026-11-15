@@ -747,13 +747,14 @@ function git(cwd: string, args: string[]): string {
   return result.stdout.trim();
 }
 
-describe("scheduled store backup", () => {
+describe.skipIf(!GIT_AVAILABLE)("scheduled store backup", () => {
   it("commits the store from inside the daemon, which holds the lock", async () => {
     const root = await mkdtemp(join(tmpdir(), "harness-sync-daemon-backup-"));
     tempRoots.push(root);
     await writeFile(join(root, "CLAUDE.md"), "# Instructions\n", "utf8");
     const project = await initializeProject(root);
     await initStoreGit(project.storeDir, "main");
+    configureIdentity(project.storeDir);
 
     // The reason this lives in the daemon at all: it holds the store lock for
     // its whole lifetime, so anything external calling `git sync` is refused.
